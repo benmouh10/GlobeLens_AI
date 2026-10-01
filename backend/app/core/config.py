@@ -39,8 +39,8 @@ class Settings(BaseSettings):
     ELASTICSEARCH_INDEX_EVENTS: str = "globelens_events"
 
     # ── LLM Providers ─────────────────────────────────────────────────────────
-    LLM_PROVIDER: str = "anthropic"          # "anthropic" | "openai" | "grok" | "gemini" | "nvidia"
-    EMBEDDING_PROVIDER: str = "openai"       # "openai" | "gemini" | "grok" | "azure"
+    LLM_PROVIDER: str = "anthropic"          # "anthropic" | "openai" | "grok" | "gemini" | "nvidia" | "ollama"
+    EMBEDDING_PROVIDER: str = "openai"       # "openai" | "gemini" | "grok" | "azure" | "ollama"
     ANTHROPIC_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     GROK_API_KEY: Optional[str] = None
@@ -49,11 +49,28 @@ class Settings(BaseSettings):
     AZURE_EMBEDDING_ENDPOINT: Optional[str] = None
     NVIDIA_API_KEY: Optional[str] = None
     NVIDIA_API_URL: str = "https://integrate.api.nvidia.com/v1"
+    NVIDIA_LLM_MODEL: str = "nvidia/nemotron-3-super-120b-a12b"
     TAVILY_API_KEY: Optional[str] = None
+
+    # ── Ollama (local inference, OpenAI-compatible API) ────────────────────────
+    # Inside Docker the host is reachable via host.docker.internal, not localhost.
+    OLLAMA_BASE_URL: str = "http://host.docker.internal:11434/v1"
+    OLLAMA_LLM_MODEL: str = "qwen2.5-coder:14b"
+    OLLAMA_EMBEDDING_MODEL: str = "bge-m3"
+
+    # How much of an article body is fed to the embedding model. bge-m3 is a
+    # document encoder: the lead carries the who/what/where, while the tail is
+    # often boilerplate, related-links and newsletter furniture. Embedding the
+    # whole body made syndicated roundups ("Latest news bulletin") collide with
+    # each other on template structure rather than subject matter.
+    EMBEDDING_MAX_CONTENT_CHARS: int = 1500
 
 
     # ── Embedding ─────────────────────────────────────────────────────────────
     EMBEDDING_MODEL: str = "text-embedding-3-small"
+    # Must match the pgvector column width in the embeddings table.
+    # 1536 = text-embedding-3-small, 1024 = bge-m3, 768 = nomic-embed-text.
+    EMBEDDING_DIMENSIONS: int = 1536
 
     # ── CORS ──────────────────────────────────────────────────────────────
     # Accepts a comma-separated string OR a JSON array string from the env:

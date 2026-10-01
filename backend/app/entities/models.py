@@ -12,6 +12,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from app.core.config import settings
+
 
 # ── Base ──────────────────────────────────────────────────────────────────────
 class Base(DeclarativeBase):
@@ -135,7 +137,9 @@ class Embedding(Base):
 
     id: Mapped[uuid.UUID]      = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     # 1536 dimensions for text-embedding-3-small
-    vector: Mapped[list]       = mapped_column(Vector(1536))
+    # Width tracks settings.EMBEDDING_DIMENSIONS so the ORM stays aligned with the
+    # pgvector column after a provider switch (1536 OpenAI, 1024 bge-m3, 768 nomic).
+    vector: Mapped[list]       = mapped_column(Vector(settings.EMBEDDING_DIMENSIONS))
     model: Mapped[str]         = mapped_column(String(100), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     article_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("articles.id"), unique=True, index=True)

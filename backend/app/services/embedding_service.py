@@ -14,6 +14,7 @@ from app.core.database import AsyncSessionFactory
 from app.repositories.article_repository import ArticleRepository
 from app.repositories.embedding_repository import EmbeddingRepository
 from app.services.cache_service import cache_service
+from app.services.article_classifier import prepare_embedding_text
 
 logger = structlog.get_logger()
 
@@ -64,6 +65,14 @@ class EmbeddingService:
                 default_query={"api-version": "2024-05-01-preview"},
                 default_headers={"api-key": settings.AZURE_EMBEDDING_API_KEY}
             )
+        elif settings.EMBEDDING_PROVIDER == "ollama":
+            logger.info("Initializing EmbeddingService client with Ollama config", model=settings.OLLAMA_EMBEDDING_MODEL)
+            self._client = AsyncOpenAI(
+                api_key="ollama",
+                base_url=settings.OLLAMA_BASE_URL,
+                timeout=120.0
+            )
+            self._model = settings.OLLAMA_EMBEDDING_MODEL
         else:
             logger.info("Initializing EmbeddingService client with OpenAI config")
             self._client = AsyncOpenAI(
@@ -98,6 +107,9 @@ class EmbeddingService:
             is_placeholder = not settings.GROK_API_KEY or "your_" in settings.GROK_API_KEY
         elif settings.EMBEDDING_PROVIDER == "gemini":
             is_placeholder = not settings.GEMINI_API_KEY or "your_" in settings.GEMINI_API_KEY
+        elif settings.EMBEDDING_PROVIDER == "ollama":
+            # Local inference needs no credential, only a reachable daemon.
+            is_placeholder = not settings.OLLAMA_BASE_URL
         else:  # openai
             is_placeholder = not settings.OPENAI_API_KEY or "your_" in settings.OPENAI_API_KEY
 
@@ -162,9 +174,12 @@ class EmbeddingService:
                     "model": self._model
                 }
                 # Azure and OpenAI text-embedding-3-small support the dimensions parameter.
-                # The database schema expects 1536 dimensions.
-                if "text-embedding-3-" in self._model or settings.EMBEDDING_PROVIDER == "azure":
-                    kwargs["dimensions"] = 1536
+                # The database schema expects EMBEDDING_DIMENSIONS dimensions.
+                # Ollama fixes its own output width and rejects the parameter, so skip it there.
+                if settings.EMBEDDING_PROVIDER != "ollama" and (
+                    "text-embedding-3-" in self._model or settings.EMBEDDING_PROVIDER == "azure"
+                ):
+                    kwargs["dimensions"] = settings.EMBEDDING_DIMENSIONS
                 response = await self._client.embeddings.create(**kwargs)
                 vector = response.data[0].embedding
             
@@ -179,9 +194,11 @@ class EmbeddingService:
             logger.error("Embedding API call failed, running heuristic mock fallback", model=self._model, error=str(api_err))
             return self._generate_mock_vector(text)
 
-    def _generate_mock_vector(self, text: str, dimensions: int = 1536) -> List[float]:
+    def _generate_mock_vector(self, text: str, dimensions: int = 0) -> List[float]:
         """Generate a deterministic unit-length mock vector for a given text input."""
         import random
+        if not dimensions:
+            dimensions = settings.EMBEDDING_DIMENSIONS
         text_bytes = text.encode("utf-8")
         h = hashlib.sha256(text_bytes).digest()
         seed = int.from_bytes(h[:4], "big")
@@ -234,8 +251,13 @@ class EmbeddingService:
                         continue
 
                     try:
-                        # Combine title and content for better contextual embedding representation
-                        text_to_embed = f"{art_title}\n\n{art_content}"
+                        # Title is duplicated and the body capped: see
+                        # article_classifier.prepare_embedding_text.
+                        text_to_embed = prepare_embedding_text(
+                            art_title,
+                            art_content,
+                            settings.EMBEDDING_MAX_CONTENT_CHARS,
+                        )
                         vector = await self.generate_vector(text_to_embed)
 
                         await embed_repo.create_embedding(

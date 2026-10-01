@@ -107,15 +107,22 @@ async def get_stats(
     from app.entities.models import Article, Event, Source, ProcessingStatus
     
     # 1. Ingestion Funnel Counts
-    scraped_count = await db.scalar(
-        select(func.count(Article.id)).where(Article.processing_status == ProcessingStatus.SCRAPED)
-    ) or 0
-    vectorized_count = await db.scalar(
-        select(func.count(Article.id)).where(Article.processing_status == ProcessingStatus.EMBEDDED)
-    ) or 0
-    clustered_count = await db.scalar(
-        select(func.count(Article.id)).where(Article.processing_status == ProcessingStatus.CLUSTERED)
-    ) or 0
+    # The funnel is cumulative: each stage counts every article that reached it
+    # OR went further. Counting only the exact current status makes the funnel
+    # drain to zero as soon as the pipeline finishes, since a completed article
+    # sits in PROCESSED and leaves all three earlier buckets. Stage order is
+    # taken from the ProcessingStatus enum so added stages stay correct.
+    pipeline_order = list(ProcessingStatus)
+
+    async def count_reaching(stage: ProcessingStatus) -> int:
+        reached = pipeline_order[pipeline_order.index(stage):]
+        return await db.scalar(
+            select(func.count(Article.id)).where(Article.processing_status.in_(reached))
+        ) or 0
+
+    scraped_count = await count_reaching(ProcessingStatus.SCRAPED)
+    vectorized_count = await count_reaching(ProcessingStatus.EMBEDDED)
+    clustered_count = await count_reaching(ProcessingStatus.CLUSTERED)
     enriched_count = await db.scalar(
         select(func.count(Event.id)).where(Event.status == "PROCESSED")
     ) or 0

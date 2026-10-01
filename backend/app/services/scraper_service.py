@@ -36,6 +36,47 @@ class ScraperService:
     Service responsible for RSS discovery and scraping using Playwright + BeautifulSoup.
     """
 
+    # Bot-protection and error interstitials are served with HTTP 200, so the
+    # status code looks fine and the body is a handful of short paragraphs.
+    # Without this check those pages pass the "non-empty" test and get stored
+    # as articles, which then pollutes the embedding space and the clustering
+    # distance distribution.
+    BLOCK_PAGE_SIGNATURES = (
+        "reference #",
+        "errors.edgesuite.net",
+        "access denied",
+        "attention required",
+        "enable javascript and cookies to continue",
+        "checking your browser before accessing",
+        "request blocked",
+        "captcha",
+        "cf-browser-verification",
+        "just a moment",
+        "incapsula incident id",
+        # CNN serves this stub instead of an article when it decides the
+        # request looks automated. It is ~120 chars, below MIN_ARTICLE_CHARS,
+        # but that length check was evidently not applied on every insert
+        # path, so three of these were stored and later summarised as
+        # "The article is a placeholder for a QR code document".
+        "scan the qr code",
+        "download the cnn app",
+    )
+
+    # Real articles run well past this; every interstitial seen so far is <400.
+    MIN_ARTICLE_CHARS = 400
+
+    def _reject_if_blocked(self, content: str, url: str) -> Optional[str]:
+        """Return a rejection reason if the extracted text is not a real article."""
+        lowered = content.lower()
+        for signature in self.BLOCK_PAGE_SIGNATURES:
+            if signature in lowered:
+                return f"block-page signature {signature!r}"
+
+        if len(content.strip()) < self.MIN_ARTICLE_CHARS:
+            return f"only {len(content.strip())} chars extracted"
+
+        return None
+
     def _resolve_rss_url(self, source_name: str, source_url: str) -> str:
         """Resolve the homepage URL of a source to its RSS feed endpoint."""
         name_key = source_name.lower().strip()
@@ -134,6 +175,12 @@ class ScraperService:
                         text_blocks.append(text)
                         
                 extracted_content = "\n\n".join(text_blocks)
+
+                rejection = self._reject_if_blocked(extracted_content, url)
+                if rejection:
+                    logger.warn("Rejected non-article page", url=url, reason=rejection)
+                    return ""
+
                 logger.info("Playwright content extraction success", url=url, size_chars=len(extracted_content))
                 return extracted_content
             except Exception as e:

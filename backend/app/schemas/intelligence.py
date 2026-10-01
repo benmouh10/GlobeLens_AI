@@ -29,9 +29,13 @@ class EventIntelligenceResponse(BaseModel):
     summary: str = Field(..., description="Objective synthesis of the event. Must be minimum 3 paragraphs.")
     topic: IntelligenceTopic = Field(..., description="High-level news topic category.")
     bias_lean: IntelligenceBiasLean = Field(..., description="Overall bias lean of the aggregated articles.")
-    location_country: str = Field(..., description="Primary geographic country focus of the event.")
-    latitude: float = Field(..., description="Approximate geographic center latitude of the event.")
-    longitude: float = Field(..., description="Approximate geographic center longitude of the event.")
+    location_country: str = Field(..., description="Primary geographic country focus of the event, or 'Global'.")
+    # Coordinates are deliberately NOT requested from the LLM. The 7b model
+    # fabricated plausible lat/lon whenever it could not place a story,
+    # defaulting to 38.8951,-77.0364 (Washington DC) for unrelated events.
+    # They are derived from location_country in geocoding_service instead.
+    latitude: float | None = Field(default=None, description="Derived from location_country; not requested from the LLM.")
+    longitude: float | None = Field(default=None, description="Derived from location_country; not requested from the LLM.")
     importance_score: float = Field(..., ge=0.0, le=10.0, description="Scale of importance from 0.0 (trivial) to 10.0 (major global event).")
 
     @field_validator("summary")

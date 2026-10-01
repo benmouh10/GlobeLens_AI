@@ -144,10 +144,12 @@ export default function Map({ events, selectedEvent, onSelectEvent, activeTopicF
         style={{ height: "100%", width: "100%" }}
         zoomControl={false}
       >
-        {/* Sleek CartoDB Dark Matter TileLayer */}
+        {/* Esri World Dark Gray Canvas — raster, dark theme, no API key.
+            CARTO's basemaps.cartocdn.com now answers every tile request with an
+            "API KEY REQUIRED" placeholder image, so it cannot be used keyless. */}
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+          attribution='&copy; <a href="https://www.esri.com/">Esri</a>, HERE, Garmin, &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
         />
 
         <MapController selectedEvent={selectedEvent} />

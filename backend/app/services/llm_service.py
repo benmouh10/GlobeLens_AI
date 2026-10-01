@@ -6,7 +6,9 @@ Pipeline Step 4: CLUSTERED → PROCESSED
 """
 import uuid
 import asyncio
+import json
 import structlog
+import urllib.request
 from typing import List, Tuple, TypedDict
 from openai import AsyncOpenAI
 
@@ -24,6 +26,45 @@ from app.schemas.intelligence import (
 )
 
 logger = structlog.get_logger()
+
+
+async def ollama_chat_json(
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict
+) -> str:
+    """Call Ollama's native /api/chat with JSON-schema-constrained decoding.
+
+    Ollama's OpenAI-compatible /v1/chat/completions endpoint silently ignores
+    `format`, so constrained decoding never applied and the model returned
+    arbitrary JSON shapes such as {"article": "..."}. The native endpoint
+    honours the schema and is what makes the field names reliable.
+    """
+    base = settings.OLLAMA_BASE_URL.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    payload = {
+        "model": settings.OLLAMA_LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "format": schema,
+        "stream": False,
+        "options": {"temperature": 0.1}
+    }
+    req = urllib.request.Request(
+        f"{base}/api/chat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    loop = asyncio.get_event_loop()
+    raw = await loop.run_in_executor(
+        None,
+        lambda: urllib.request.urlopen(req, timeout=900).read()
+    )
+    body = json.loads(raw.decode("utf-8"))
+    return body["message"]["content"]
 
 
 class GeminiEventIntelligenceResponse(TypedDict):
@@ -91,6 +132,21 @@ class LLMService:
                 timeout=60.0
             )
             self._model = "mistralai/mistral-medium-3.5-128b"
+        elif settings.LLM_PROVIDER == "ollama":
+            # Ollama exposes an OpenAI-compatible API on the host. Without this
+            # branch, LLM_PROVIDER=ollama fell through to the OpenAI client
+            # below and every call went to api.openai.com instead of localhost.
+            logger.info(
+                "Initializing LLMService client with Ollama config",
+                base_url=settings.OLLAMA_BASE_URL,
+                model=settings.OLLAMA_LLM_MODEL
+            )
+            self._client = AsyncOpenAI(
+                api_key="ollama",
+                base_url=settings.OLLAMA_BASE_URL,
+                timeout=600.0
+            )
+            self._model = settings.OLLAMA_LLM_MODEL
         else:
             logger.info("Initializing LLMService client with OpenAI config")
             self._client = AsyncOpenAI(
@@ -107,6 +163,10 @@ class LLMService:
         """
         system_prompt = (
             "You are an objective, cross-border investigative journalist. "
+            "You are summarising factual news reports that have already been published. "
+            "Reporting on violence, war, crime or politics is routine journalism: "
+            "describe what the sources report without moralising, and never refuse. "
+            "If a story concerns you, still return the required JSON object.\n"
             "Your task is to analyze a cluster of news articles about a single event and synthesize them. "
             "You must return a JSON object that strictly adheres to the following JSON Schema. "
             "Ensure the summary is detailed and contains a minimum of 3 paragraphs.\n\n"
@@ -116,14 +176,54 @@ class LLMService:
             "  \"topic\": \"string (Exactly one of: POLITICS, ECONOMY, TECHNOLOGY, SPORTS, HEALTH, WORLD)\",\n"
             "  \"bias_lean\": \"string (Exactly one of: LEFT, CENTER_LEFT, CENTER, CENTER_RIGHT, RIGHT)\",\n"
             "  \"location_country\": \"string (Primary geographic focus country)\",\n"
-            "  \"latitude\": \"float (Approximate latitude)\",\n"
-            "  \"longitude\": \"float (Approximate longitude)\",\n"
             "  \"importance_score\": \"float (From 0.0 to 10.0 representing significance)\"\n"
-            "}"
+            "}\n\n"
+            "Rules for topic (decide this before writing anything else):\n"
+            "- Pick the category whose SUBJECT MATTER the event is about. Read each "
+            "label as a question you answer about the whole event.\n"
+            "- POLITICS covers government, courts, laws, elections, military "
+            "operations, treaties, protests, executions and political scandals.\n"
+            "- TECHNOLOGY covers only software, hardware, the internet, AI models "
+            "and telecom infrastructure.\n"
+            "- ECONOMY covers markets, inflation, trade, jobs, budgets and banking.\n"
+            "- SPORTS covers matches, competitions, athletes and clubs.\n"
+            "- HEALTH covers illness, hospitals, medicine and public health.\n"
+            "- WORLD covers diplomacy, disasters, migration and society.\n"
+            "- Do not choose TECHNOLOGY merely because the word \"tech\" or "
+            "\"technology\" appears somewhere in the articles. Ask whether the "
+            "event itself is about technology; usually it is not.\n"
+            "- If the event is a court case, an election, a military withdrawal "
+            "or a government decision, the answer is POLITICS.\n"
+            "- When genuinely torn between two categories, choose POLITICS if "
+            "governments or officials are involved, otherwise WORLD.\n\n"
+            "Rules for location_country:\n"
+            "- Name the single country the event is primarily about, in common English.\n"
+            "- Spell out \"United States\"; never return \"US\", \"USA\", \"U.S.\", "
+            "\"America\" or \"UK\". Write \"United Kingdom\" and \"South Korea\".\n"
+            "- If the event spans several countries equally or has no clear country, "
+            "return exactly \"Global\".\n"
+            "- Never guess; \"Global\" is better than an uncertain name.\n\n"
+            "Example of a correct response:\n"
+            "{\"summary\": \"...\", \"topic\": \"SPORTS\", \"bias_lean\": \"CENTER\", "
+            "\"location_country\": \"Global\", \"importance_score\": 6.0}\n"
         )
 
         concatenated_articles = "\n\n=== ARTICLE ===\n".join(articles_content)
         user_prompt = f"Analyze the following articles belonging to the same event cluster and generate the intelligence report:\n\n=== ARTICLE ===\n{concatenated_articles}"
+
+        # qwen2.5-coder sometimes refuses outright on stories involving
+        # executions or stabbings, returning prose instead of JSON. It follows
+        # format instructions reliably when the retry is framed as a
+        # formatting correction rather than a fresh request.
+        retry_prompt = (
+            "Your previous reply was not valid JSON for the required schema.\n"
+            "Reply with ONLY a JSON object, no prose, no markdown fence.\n"
+            "Required keys: summary (3+ paragraphs), topic, bias_lean, "
+            "location_country, importance_score.\n"
+            "topic must be exactly one of: POLITICS, ECONOMY, TECHNOLOGY, "
+            "SPORTS, HEALTH, WORLD.\n\n"
+            f"Articles:\n{concatenated_articles}"
+        )
 
         logger.info(
             "Calling Chat Completions API for event synthesis",
@@ -187,6 +287,15 @@ class LLMService:
                             raise model_err
                     else:
                         raise model_err
+            elif settings.LLM_PROVIDER == "ollama":
+                # Use the native endpoint: schema-constrained decoding is what
+                # makes the field names reliable, and the /v1 shim drops it.
+                raw_content = await ollama_chat_json(
+                    system_prompt,
+                    user_prompt,
+                    EventIntelligenceResponse.model_json_schema()
+                )
+                usage = None
             else:
                 response = await self._client.chat.completions.create(
                     model=self._model,
@@ -211,8 +320,36 @@ class LLMService:
             validated_response = EventIntelligenceResponse.model_validate_json(raw_content)
             return validated_response
         except Exception as err:
-            logger.error("LLM event analysis failed, running dynamic fallback", error=str(err))
-            
+            logger.error("LLM event analysis failed, retrying once", error=str(err))
+
+        # One retry, framed as a formatting correction.
+        try:
+            if settings.LLM_PROVIDER == "ollama":
+                retry_raw = await ollama_chat_json(
+                    system_prompt,
+                    retry_prompt,
+                    EventIntelligenceResponse.model_json_schema()
+                )
+            else:
+                retry_response = await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": retry_prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.1
+                )
+                retry_raw = retry_response.choices[0].message.content
+            validated_response = EventIntelligenceResponse.model_validate_json(retry_raw)
+            logger.info("LLM retry succeeded", topic=validated_response.topic.value)
+            return validated_response
+        except Exception as retry_err:
+            logger.error(
+                "LLM event analysis failed after retry, running dynamic fallback",
+                error=str(retry_err)
+            )
+
             title = "Current News Ingestion Feed"
             body = "No detailed content was provided."
             
@@ -254,11 +391,14 @@ class LLMService:
                 topic = IntelligenceTopic.SPORTS
 
             country = "Global"
-            lat, lon = 0.0, 0.0
+            lat, lon = None, None
+            # NB: every US entry here used to be 38.8951,-77.0364, which is
+            # downtown Washington DC. Anything reaching this fallback was
+            # plotted in DC regardless of the actual story.
             country_map = {
-                "united states": ("United States", 38.8951, -77.0364),
-                "us": ("United States", 38.8951, -77.0364),
-                "america": ("United States", 38.8951, -77.0364),
+                "united states": ("United States", 39.8, -98.6),
+                "us": ("United States", 39.8, -98.6),
+                "america": ("United States", 39.8, -98.6),
                 "china": ("China", 35.8617, 104.1954),
                 "russia": ("Russia", 61.5240, 105.3188),
                 "iran": ("Iran", 32.4279, 53.6880),
@@ -287,6 +427,13 @@ class LLMService:
                 if key in topic_str:
                     country, lat, lon = val
                     break
+
+            # Prefer keyword evidence for topic over the substring
+            # heuristics above, which are crude by comparison.
+            from app.services.article_classifier import classify_topic as _kw_topic
+            kw_topic = _kw_topic(title, body)
+            if kw_topic:
+                topic = IntelligenceTopic(kw_topic)
 
             fallback_intel = EventIntelligenceResponse(
                 summary=summary,

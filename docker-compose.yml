@@ -141,6 +141,10 @@ services:
       - ./backend/app:/app/app:delegated
       - ./backend/alembic.ini:/app/alembic.ini
       - ./backend/alembic:/app/alembic
+      # Host-visible logs so long one-off enrichment runs survive
+      # `docker compose run --rm`, which otherwise deletes the log with
+      # the container.
+      - ./backend/logs:/app/logs
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     environment:
@@ -160,25 +164,34 @@ services:
       ELASTICSEARCH_URL: http://search:9200
       ELASTICSEARCH_INDEX_EVENTS: ${ELASTICSEARCH_INDEX_EVENTS:-globelens_events}
 
-      # ── LLM Provider (Anthropic Claude / OpenAI / Gemini / Grok / Nvidia / Azure) ──
+      # ── LLM Provider (Ollama / Anthropic Claude / OpenAI / Gemini / Grok / Nvidia / Azure) ──
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GROK_API_KEY: ${GROK_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
       AZURE_EMBEDDING_API_KEY: ${AZURE_EMBEDDING_API_KEY:-}
       AZURE_EMBEDDING_ENDPOINT: ${AZURE_EMBEDDING_ENDPOINT:-}
       NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
       NVIDIA_API_URL: ${NVIDIA_API_URL:-https://integrate.api.nvidia.com/v1}
+      NVIDIA_LLM_MODEL: ${NVIDIA_LLM_MODEL:-nvidia/nemotron-3-super-120b-a12b}
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+
+      # ── Ollama (local inference) ──
+      # host.docker.internal routes to the Windows host from inside the container.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-qwen2.5-coder:14b}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-bge-m3}
 
 
       # ── Embedding Model ──
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      # Must match the pgvector column width on embeddings.vector
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
 
       # ── CORS ──
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
     networks:
       - globelens_net
     # Backend only starts after all infrastructure services are healthy

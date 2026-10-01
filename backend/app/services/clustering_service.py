@@ -11,6 +11,7 @@ from app.core.database import AsyncSessionFactory
 from app.entities.models import Event, ProcessingStatus
 from app.repositories.article_repository import ArticleRepository
 from app.repositories.event_repository import EventRepository
+from app.services.article_classifier import is_aggregator_article
 
 logger = structlog.get_logger()
 
@@ -21,7 +22,12 @@ class ClusteringService:
     Uses pgvector's built-in similarity operators for efficient database-level search.
     """
 
-    SIMILARITY_THRESHOLD_DISTANCE: float = 0.08  # Cosine distance = 1 - similarity (0.92 similarity)
+    # Cosine distance = 1 - similarity. Measured on this corpus the distance
+    # histogram is bimodal: same-story articles from different outlets land
+    # between 0.10 and 0.21, and unrelated pairs start at 0.28 and climb past
+    # 0.6. 0.25 sits in the gap between those two modes, so it accepts real
+    # cross-outlet matches without dragging in unrelated stories.
+    SIMILARITY_THRESHOLD_DISTANCE: float = 0.25
 
     async def cluster_unassigned_articles(self) -> Tuple[int, int]:
         """
@@ -61,6 +67,34 @@ class ClusteringService:
                         logger.warn("Article missing embedding, skipping clustering", article_id=str(art_id))
                         continue
 
+                    art_obj = await article_repo.find_by_id(art_id)
+                    if not art_obj:
+                        logger.warn("Article not found, skipping clustering", article_id=str(art_id))
+                        continue
+
+                    # Roundups summarise many unrelated stories in one post, so
+                    # their vector averages several topics and lands near
+                    # unrelated clusters. They get their own event and never
+                    # absorb or are absorbed by other articles.
+                    if is_aggregator_article(art_obj.title, art_obj.content):
+                        new_event = Event(
+                            title=art_title,
+                            summary=None,
+                            status="DRAFT",
+                        )
+                        session.add(new_event)
+                        await session.flush()
+                        art_obj.event_id = new_event.id
+                        art_obj.processing_status = ProcessingStatus.CLUSTERED
+                        await session.commit()
+                        new_events_created += 1
+                        logger.info(
+                            "Aggregator article isolated into its own event",
+                            article_id=str(art_id),
+                            title=art_title[:60],
+                        )
+                        continue
+
                     try:
                         # Find closest event within time window and threshold
                         event_id = await event_repo.find_closest_event_by_vector(
@@ -71,10 +105,6 @@ class ClusteringService:
 
                         if event_id:
                             # Match found: assign to existing event
-                            art_obj = await article_repo.find_by_id(art_id)
-                            if not art_obj:
-                                raise ValueError(f"Article with ID {art_id} not found")
-                            
                             art_obj.event_id = event_id
                             art_obj.processing_status = ProcessingStatus.CLUSTERED
                             await session.commit()
