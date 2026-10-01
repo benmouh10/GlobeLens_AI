@@ -31,7 +31,8 @@ logger = structlog.get_logger()
 async def ollama_chat_json(
     system_prompt: str,
     user_prompt: str,
-    schema: dict
+    schema: dict,
+    temperature: float = 0.1
 ) -> str:
     """Call Ollama's native /api/chat with JSON-schema-constrained decoding.
 
@@ -51,7 +52,7 @@ async def ollama_chat_json(
         ],
         "format": schema,
         "stream": False,
-        "options": {"temperature": 0.1}
+        "options": {"temperature": temperature}
     }
     req = urllib.request.Request(
         f"{base}/api/chat",
@@ -200,12 +201,24 @@ class LLMService:
             "- Name the single country the event is primarily about, in common English.\n"
             "- Spell out \"United States\"; never return \"US\", \"USA\", \"U.S.\", "
             "\"America\" or \"UK\". Write \"United Kingdom\" and \"South Korea\".\n"
-            "- If the event spans several countries equally or has no clear country, "
-            "return exactly \"Global\".\n"
-            "- Never guess; \"Global\" is better than an uncertain name.\n\n"
-            "Example of a correct response:\n"
-            "{\"summary\": \"...\", \"topic\": \"SPORTS\", \"bias_lean\": \"CENTER\", "
-            "\"location_country\": \"Global\", \"importance_score\": 6.0}\n"
+            "- \"Global\" is a last resort, not a safe default. If the articles "
+            "name a specific country, a city or an organisation, name that "
+            "country even when several are mentioned. A university in New York "
+            "is United States; a team from Dublin competing in a Eurovision held "
+            "elsewhere is Ireland.\n"
+            "- Use \"Global\" only for genuinely placeless events: weather "
+            "affecting several distant regions, a rolling digest covering "
+            "unrelated stories, or an event with no geography at all.\n"
+            "- A named institution, team, campus or broadcaster is a location. "
+            "Identify the country it belongs to rather than returning Global.\n"
+            "- Return exactly \"Global\" only when the event genuinely has no "
+            "single country: a digest covering unrelated stories, or a weather "
+            "system affecting distant regions at once.\n"
+            "- When two countries are equally central, name the one the story "
+            "leads with rather than giving up.\n\n"
+            "Example of a correct response for a report about a university in New York:\n"
+            "{\"summary\": \"...\", \"topic\": \"POLITICS\", \"bias_lean\": \"CENTER\", "
+            "\"location_country\": \"United States\", \"importance_score\": 6.0}\n"
         )
 
         concatenated_articles = "\n\n=== ARTICLE ===\n".join(articles_content)
@@ -445,6 +458,63 @@ class LLMService:
                 importance_score=7.0
             )
             return fallback_intel
+
+    async def resolve_primary_country(self, title: str, body_excerpt: str = "") -> str | None:
+        """
+        Second-pass country resolution for events the main synthesis called Global.
+
+        Asking for five fields at once, one of which is a three-paragraph summary,
+        makes qwen2.5-coder default location_country to "Global": the summary
+        dominates the decode and the country is whatever is left. Tightening the
+        system prompt did not help, and the same model answers "United States"
+        correctly when the only thing asked for is the country. So this asks for
+        exactly that, with a one-field schema.
+        """
+        schema = {
+            "type": "object",
+            "properties": {"location_country": {"type": "string"}},
+            "required": ["location_country"],
+        }
+        prompt = (
+            "Give the primary country of this news story as a JSON object. "
+            "Prefer a specific country. A named university, team, broadcaster "
+            "or city belongs to a country. Answer Global only for a "
+            "multi-country digest, or weather affecting distant regions at once.\n"
+            f"title: {title}\n"
+            f"body: {body_excerpt[:1200]}"
+        )
+
+        for attempt in range(2):
+            if settings.LLM_PROVIDER == "ollama":
+                raw = await ollama_chat_json(
+                    "You extract the country a news story is primarily about.",
+                    prompt,
+                    schema,
+                    temperature=0.4 if attempt else 0.1,
+                )
+            else:
+                response = await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"},
+                    temperature=0,
+                )
+                raw = response.choices[0].message.content
+
+            try:
+                country = json.loads(raw).get("location_country")
+            except Exception as err:
+                logger.warn("Country second pass failed", error=str(err))
+                return None
+
+            # "Global" here is the same non-committal answer the first pass
+            # gave, and it is inconsistent run to run. Ask again with the body
+            # still in place: the title alone is enough to reach for Global,
+            # since most headlines omit the place the story is filed from.
+            if country and country.strip().lower() != "global":
+                return country
+
+        return None
 
     async def analyze_claim_credibility(self, text_content: str) -> FactCheckResponse:
         """

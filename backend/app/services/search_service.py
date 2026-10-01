@@ -126,8 +126,9 @@ class SearchService:
 
     async def sync_all_processed_events(self) -> Tuple[int, int]:
         """
-        Queries the database for all events in PROCESSED status and bulk-indexes
-        them into Elasticsearch. Returns a tuple (indexed_count, failed_count).
+        Queries the database for all events in PROCESSED status, bulk-indexes
+        them into Elasticsearch, then removes documents whose event no longer
+        exists. Returns (indexed_count, removed_count).
         """
         logger.info("Starting bulk database to Elasticsearch synchronization")
         indexed_count = 0
@@ -165,7 +166,7 @@ class SearchService:
                 # Perform bulk index operation using the helpers
                 client = self.search_repository._client
                 success, errors = await async_bulk(client, actions, raise_on_error=False)
-                
+
                 indexed_count = success
                 failed_count = len(errors) if isinstance(errors, list) else int(errors)
                 logger.info(
@@ -173,8 +174,34 @@ class SearchService:
                     success_count=indexed_count,
                     failed_count=failed_count
                 )
+
+                # Prune documents for events that no longer exist. Bulk index
+                # only upserts, so deleting an event in Postgres leaves a
+                # stale document behind and the index count drifts upward.
+                keep = {str(event.id) for event in events}
+                stale_removed = 0
+                try:
+                    response = await client.search(
+                        index=self.index_name,
+                        query={"match_all": {}},
+                        source=False,
+                        size=10000,
+                    )
+                    for hit in response["hits"]["hits"]:
+                        doc_id = hit["_id"]
+                        if doc_id not in keep:
+                            await client.delete(
+                                index=self.index_name, id=doc_id, refresh=True
+                            )
+                            stale_removed += 1
+                    if stale_removed:
+                        logger.info("Pruned stale search documents", count=stale_removed)
+                except Exception as prune_err:
+                    logger.warn("Stale document prune failed", error=str(prune_err))
+
+                removed_count = stale_removed
             except Exception as exc:
                 logger.error("Fatal error during bulk synchronization", error=str(exc))
                 raise exc
                 
-        return indexed_count, failed_count
+        return indexed_count, removed_count

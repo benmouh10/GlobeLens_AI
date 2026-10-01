@@ -368,6 +368,29 @@ _ALIASES = {
     "democratic republic of the congos": "dr congo",
 }
 
+# Needles for scanning free text, derived from the alias table so the two
+# cannot drift. Plain country names are added as well, since headlines
+# usually use the name itself rather than an alias.
+_TEXT_NEEDLES: dict[str, str] = {
+    needle: target for needle, target in _ALIASES.items() if len(needle) >= 4
+}
+for _key in COUNTRY_GEO:
+    _TEXT_NEEDLES.setdefault(_key, _key)
+    _TEXT_NEEDLES.setdefault(_key.replace(" ", ""), _key)
+
+# Ambiguous words that are countries only when capitalised in the original.
+# Scanning lowercased text matches "chad" inside "czech", "niger" inside
+# "nigeria" is fine, but "turkey" the bird and "jordan" the name both appear
+# in news copy meaning something else often enough to matter.
+_TEXT_NEEDLES.pop("turkey", None)
+_TEXT_NEEDLES.pop("jordan", None)
+_TEXT_NEEDLES["turkey's"] = "turkey"
+_TEXT_NEEDLES["turkey’s"] = "turkey"
+_TEXT_NEEDLES["turkish"] = "turkey"
+_TEXT_NEEDLES["jordan's"] = "jordan"
+_TEXT_NEEDLES["jordan’s"] = "jordan"
+_TEXT_NEEDLES["jordanian"] = "jordan"
+
 
 def normalize_country(name: Optional[str]) -> Optional[str]:
     """Map an LLM-supplied country string onto a known country, if possible."""
@@ -388,6 +411,55 @@ def normalize_country(name: Optional[str]) -> Optional[str]:
     if undotted in _ALIASES:
         return _ALIASES[undotted]
 
+    return None
+
+
+def country_from_text(text: str, limit: int = 400) -> Optional[str]:
+    """
+    First country named in a headline, by position.
+
+    Used only as a fallback when the LLM answers "Global". Asking the model a
+    second time did not help: it answered Global or a real country on different
+    runs for the same article, so it is not a reliable judge of its own output.
+    A headline is different evidence, not a second opinion of the same prompt:
+    "Ireland will boycott Eurovision" names Ireland as the actor, and "Cornell
+    won't, we will" names an institution the reader can place.
+
+    Scans for country names and their aliases and returns whichever appears
+    first in the string, so the acting country beats the country being objected
+    to. Returns None when nothing matches, which keeps genuine digests and
+    multi-region stories at Global.
+    """
+    if not text:
+        return None
+
+    window = text[:limit]
+    lowered = window.lower()
+
+    best_position: Optional[int] = None
+    best_country: Optional[str] = None
+
+    for needle, country in _TEXT_NEEDLES.items():
+        position = _find_word(lowered, needle)
+        if position is None:
+            continue
+        if best_position is None or position < best_position:
+            best_position = position
+            best_country = country
+
+    return best_country
+
+
+def _find_word(haystack: str, needle: str) -> Optional[int]:
+    """Locate needle in haystack on word boundaries, so "chad" misses "czech"."""
+    start = haystack.find(needle)
+    while start != -1:
+        before_ok = start == 0 or not haystack[start - 1].isalnum()
+        end = start + len(needle)
+        after_ok = end >= len(haystack) or not haystack[end].isalnum()
+        if before_ok and after_ok:
+            return start
+        start = haystack.find(needle, start + 1)
     return None
 
 
