@@ -6,7 +6,7 @@ DELETE /admin/users/{id} | /admin/comments/{id}
 POST /admin/events/promote | /admin/sources
 """
 from fastapi import APIRouter, Path, status, Depends, BackgroundTasks, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 
 from app.controllers.auth_controller import get_current_user
@@ -44,6 +44,15 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 class UpdateRoleRequest(BaseModel):
+    role: str  # GUEST | AUTH_USER | JOURNALIST | ADMIN
+
+
+class CreateUserRequest(BaseModel):
+    """Provision an account with an operator-chosen role."""
+
+    name: str = Field(..., min_length=2, max_length=255)
+    email: EmailStr
+    password: str = Field(..., min_length=8, max_length=128)
     role: str  # GUEST | AUTH_USER | JOURNALIST | ADMIN
 
 
@@ -128,6 +137,58 @@ async def list_users(
             }
             for u in users
         ]
+    }
+
+
+@router.post("/users", status_code=status.HTTP_201_CREATED, summary="Create an account with any role (ADMIN)")
+async def create_user(
+    payload: CreateUserRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """
+    Provision an account directly, bypassing public self-registration so an
+    operator can assign the role (JOURNALIST, ADMIN, ...) at creation time.
+    """
+    from sqlalchemy import select
+    from app.entities.models import User as UserModel
+    from app.services.auth_service import hash_password
+
+    try:
+        new_role = UserRole(payload.role.upper())
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown role '{payload.role}'. Valid roles: "
+                   f"{', '.join(r.value for r in UserRole)}",
+        )
+
+    email = str(payload.email).strip().lower()
+    existing = await db.execute(select(UserModel).where(UserModel.email == email))
+    if existing.scalars().first():
+        raise HTTPException(status_code=409, detail="Email is already registered")
+
+    user = UserModel(
+        name=payload.name.strip(),
+        email=email,
+        password_hash=hash_password(payload.password),
+        role=new_role,
+        is_blocked=False,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+
+    return {
+        "message": "Account created",
+        "user": {
+            "id": str(user.id),
+            "name": user.name,
+            "email": user.email,
+            "role": user.role.value if hasattr(user.role, "value") else user.role,
+            "is_blocked": user.is_blocked,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+        },
     }
 
 

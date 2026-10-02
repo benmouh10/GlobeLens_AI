@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { 
   Globe, 
   Link as LinkIcon, 
@@ -186,9 +187,13 @@ export default function FactCheckerPage() {
           </div>
         </div>
         <div className="flex items-center gap-4">
-          <div className="w-8 h-8 rounded-full bg-zinc-900 border border-indigo-950/50 flex items-center justify-center font-mono-data text-xs text-cyber-cyan font-bold shadow-[0_0_10px_rgba(6,182,212,0.15)]">
+          <Link
+            href="/profile"
+            title="View your profile"
+            className="w-8 h-8 rounded-full bg-zinc-900 border border-indigo-950/50 flex items-center justify-center font-mono-data text-xs text-cyber-cyan font-bold shadow-[0_0_10px_rgba(6,182,212,0.15)] hover:border-cyber-cyan/50 hover:scale-105 transition-all"
+          >
             {userProfile.name.slice(0, 2).toUpperCase()}
-          </div>
+          </Link>
         </div>
       </nav>
 

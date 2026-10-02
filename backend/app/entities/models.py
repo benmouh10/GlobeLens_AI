@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    Boolean, DateTime, Enum, Float, ForeignKey,
+    Boolean, CheckConstraint, DateTime, Enum, Float, ForeignKey,
     String, Text, UniqueConstraint, func
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
@@ -26,6 +26,27 @@ class ProcessingStatus(str, enum.Enum):
     EMBEDDED  = "EMBEDDED"
     CLUSTERED = "CLUSTERED"
     PROCESSED = "PROCESSED"
+
+
+class ArticleOrigin(str, enum.Enum):
+    """Where an article came from.
+
+    PIPELINE rows are collected by the scraper and carry a source + event.
+    AUTHORED rows are written in the newsroom by a journalist: they have an
+    ``author_id`` and no publisher source.
+    """
+    PIPELINE = "PIPELINE"
+    AUTHORED = "AUTHORED"
+
+
+class PublicationStatus(str, enum.Enum):
+    """Editorial state of an authored article.
+
+    Pipeline articles are published on arrival; authored ones start as DRAFT
+    and only become visible to readers once a journalist publishes them.
+    """
+    DRAFT     = "DRAFT"
+    PUBLISHED = "PUBLISHED"
 
 
 class UserRole(str, enum.Enum):
@@ -87,6 +108,9 @@ class User(Base):
     comments: Mapped[List["Comment"]]           = relationship("Comment", back_populates="user", passive_deletes=True)
     fact_check_requests: Mapped[List["FactCheckRequest"]] = relationship("FactCheckRequest", back_populates="user", passive_deletes=True)
     bookmarks: Mapped[List["Bookmark"]] = relationship("Bookmark", back_populates="user", passive_deletes=True)
+    # Deleting an author keeps their published articles; the FK is ON DELETE
+    # SET NULL, so passive_deletes lets PostgreSQL detach them.
+    authored_articles: Mapped[List["Article"]] = relationship("Article", back_populates="author", passive_deletes=True)
 
 
 # ── Event ─────────────────────────────────────────────────────────────────────
@@ -128,13 +152,13 @@ class Event(Base):
 
 # ── Article ───────────────────────────────────────────────────────────────────
 class Article(Base):
-    """Foundational content unit — scraped from media publishers."""
+    """Content unit — either scraped from a publisher or authored in the newsroom."""
     __tablename__ = "articles"
 
     id: Mapped[uuid.UUID]             = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title: Mapped[str]                = mapped_column(String(500), nullable=False)
     content: Mapped[Optional[str]]    = mapped_column(Text)
-    url: Mapped[str]                  = mapped_column(String(2000), nullable=False, unique=True)
+    url: Mapped[Optional[str]]        = mapped_column(String(2000), unique=True)
     published_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime]      = mapped_column(DateTime(timezone=True), server_default=func.now())
     processing_status: Mapped[ProcessingStatus] = mapped_column(
@@ -143,10 +167,21 @@ class Article(Base):
     is_hidden: Mapped[bool]           = mapped_column(Boolean, default=False)
     source_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("sources.id"), index=True)
     event_id: Mapped[Optional[uuid.UUID]]  = mapped_column(UUID(as_uuid=True), ForeignKey("events.id"), index=True)
+    author_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    origin: Mapped[ArticleOrigin] = mapped_column(
+        Enum(ArticleOrigin), default=ArticleOrigin.PIPELINE, nullable=False, index=True
+    )
+    publication_status: Mapped[PublicationStatus] = mapped_column(
+        Enum(PublicationStatus), default=PublicationStatus.PUBLISHED, nullable=False, index=True
+    )
 
     source: Mapped[Optional["Source"]]  = relationship("Source", back_populates="articles")
     event: Mapped[Optional["Event"]]    = relationship("Event", back_populates="articles")
+    author: Mapped[Optional["User"]]    = relationship("User", back_populates="authored_articles")
     embedding: Mapped[Optional["Embedding"]] = relationship("Embedding", back_populates="article", uselist=False)
+    comments: Mapped[List["Comment"]] = relationship("Comment", back_populates="article", passive_deletes=True)
 
 
 # ── Embedding ─────────────────────────────────────────────────────────────────
@@ -168,17 +203,31 @@ class Embedding(Base):
 
 # ── Comment ───────────────────────────────────────────────────────────────────
 class Comment(Base):
-    """User community comments on Events."""
+    """User community comments on an Event or a newsroom-authored Article."""
     __tablename__ = "comments"
+    __table_args__ = (
+        CheckConstraint(
+            "(event_id IS NOT NULL) <> (article_id IS NOT NULL)",
+            name="ck_comment_exactly_one_target",
+        ),
+    )
 
     id: Mapped[uuid.UUID]      = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     content: Mapped[str]       = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
-    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("events.id"), index=True)
+    # A comment targets either an aggregated Event or a newsroom-authored
+    # Article, never both; the check constraint enforces exactly one.
+    event_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("events.id"), index=True, nullable=True
+    )
+    article_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("articles.id", ondelete="CASCADE"), index=True, nullable=True
+    )
 
     user:  Mapped["User"]  = relationship("User",  back_populates="comments")
-    event: Mapped["Event"] = relationship("Event", back_populates="comments")
+    event: Mapped[Optional["Event"]] = relationship("Event", back_populates="comments")
+    article: Mapped[Optional["Article"]] = relationship("Article", back_populates="comments")
 
 
 # ── FactCheckRequest ──────────────────────────────────────────────────────────

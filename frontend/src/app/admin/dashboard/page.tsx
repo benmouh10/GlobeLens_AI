@@ -18,7 +18,9 @@ import {
   Layers, 
   Globe, 
   UserCheck, 
-  LogOut 
+  LogOut,
+  UserPlus,
+  X
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -74,6 +76,15 @@ interface SelectedEvent {
   source_count: number;
 }
 
+interface AdminUser {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  is_blocked: boolean;
+  created_at: string | null;
+}
+
 export default function AdminDashboardPage() {
   const router = useRouter();
   const [token, setToken] = useState<string | null>(null);
@@ -99,6 +110,22 @@ export default function AdminDashboardPage() {
   const [mapEvents, setMapEvents] = useState<SelectedEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<SelectedEvent | null>(null);
   const [isStatsLoading, setIsStatsLoading] = useState(true);
+
+  // Account Management States
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [usersError, setUsersError] = useState<string | null>(null);
+  const [userBusyId, setUserBusyId] = useState<string | null>(null);
+
+  // Create-account form states
+  const [showCreateUser, setShowCreateUser] = useState(false);
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserEmail, setNewUserEmail] = useState("");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [newUserRole, setNewUserRole] = useState("AUTH_USER");
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [createUserError, setCreateUserError] = useState<string | null>(null);
 
   // Administrative Trigger States
   const [triggerStatus, setTriggerStatus] = useState<{
@@ -190,6 +217,29 @@ export default function AdminDashboardPage() {
     }
   }, [token]);
 
+  // Fetch the account directory (ADMIN only)
+  const fetchUsers = useCallback(async () => {
+    if (!token) return;
+    setUsersLoading(true);
+    setUsersError(null);
+    try {
+      const resp = await fetch(`${API_BASE_URL}/api/v1/admin/users`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (resp.status === 401 || resp.status === 403) {
+        handleLogout();
+        return;
+      }
+      if (!resp.ok) throw new Error(`Failed to load accounts (${resp.status})`);
+      const data = await resp.json();
+      setUsers(data.users || []);
+    } catch (err: any) {
+      setUsersError(err.message || "Failed to load accounts");
+    } finally {
+      setUsersLoading(false);
+    }
+  }, [token]);
+
   // Sync health checks and analytics polling loops
   useEffect(() => {
     checkHealth();
@@ -204,6 +254,143 @@ export default function AdminDashboardPage() {
       return () => clearInterval(statsInterval);
     }
   }, [token, fetchStatsAndMap]);
+
+  // Resolve the signed-in admin id (used to lock self-mutation in the table)
+  useEffect(() => {
+    if (!token) return;
+    (async () => {
+      try {
+        const resp = await fetch(`${API_BASE_URL}/api/v1/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (resp.ok) {
+          const me = await resp.json();
+          setCurrentUserId(me.id);
+        }
+      } catch {
+        /* best-effort */
+      }
+    })();
+  }, [token]);
+
+  // Account directory polling
+  useEffect(() => {
+    if (token) {
+      fetchUsers();
+      const usersInterval = setInterval(fetchUsers, 30000);
+      return () => clearInterval(usersInterval);
+    }
+  }, [token, fetchUsers]);
+
+  // Change a user's role
+  const changeUserRole = async (userId: string, role: string) => {
+    if (!token || userBusyId) return;
+    setUserBusyId(userId);
+    setUsersError(null);
+    try {
+      const resp = await fetch(`${API_BASE_URL}/api/v1/admin/users/${userId}/role`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ role })
+      });
+      if (resp.status === 401 || resp.status === 403) { handleLogout(); return; }
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({}));
+        throw new Error(detail.detail || `Role update failed (${resp.status})`);
+      }
+      setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, role } : u)));
+    } catch (err: any) {
+      setUsersError(err.message || "Failed to update role");
+    } finally {
+      setUserBusyId(null);
+    }
+  };
+
+  // Block / unblock a user
+  const toggleUserBlock = async (userId: string) => {
+    if (!token || userBusyId) return;
+    setUserBusyId(userId);
+    setUsersError(null);
+    try {
+      const resp = await fetch(`${API_BASE_URL}/api/v1/admin/users/${userId}/block`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (resp.status === 401 || resp.status === 403) { handleLogout(); return; }
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({}));
+        throw new Error(detail.detail || `Block update failed (${resp.status})`);
+      }
+      const data = await resp.json();
+      setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, is_blocked: data.is_blocked } : u)));
+    } catch (err: any) {
+      setUsersError(err.message || "Failed to update block status");
+    } finally {
+      setUserBusyId(null);
+    }
+  };
+
+  // Delete a user
+  const deleteUser = async (userId: string) => {
+    if (!token || userBusyId) return;
+    if (!window.confirm("Delete this account? This action cannot be undone.")) return;
+    setUserBusyId(userId);
+    setUsersError(null);
+    try {
+      const resp = await fetch(`${API_BASE_URL}/api/v1/admin/users/${userId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (resp.status === 401 || resp.status === 403) { handleLogout(); return; }
+      if (!resp.ok && resp.status !== 204) {
+        const detail = await resp.json().catch(() => ({}));
+        throw new Error(detail.detail || `Delete failed (${resp.status})`);
+      }
+      setUsers((prev) => prev.filter((u) => u.id !== userId));
+    } catch (err: any) {
+      setUsersError(err.message || "Failed to delete account");
+    } finally {
+      setUserBusyId(null);
+    }
+  };
+
+  // Create a new account with an operator-chosen role
+  const handleCreateUser = async () => {
+    if (!token || creatingUser) return;
+    setCreatingUser(true);
+    setCreateUserError(null);
+    try {
+      const resp = await fetch(`${API_BASE_URL}/api/v1/admin/users`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: newUserName.trim(),
+          email: newUserEmail.trim(),
+          password: newUserPassword,
+          role: newUserRole
+        })
+      });
+      if (resp.status === 401 || resp.status === 403) { handleLogout(); return; }
+      if (!resp.ok) {
+        const detail = await resp.json().catch(() => ({}));
+        const msg = Array.isArray(detail.detail)
+          ? detail.detail.map((d: any) => d.msg).join(", ")
+          : detail.detail;
+        throw new Error(msg || `Create failed (${resp.status})`);
+      }
+      const data = await resp.json();
+      if (data.user) setUsers((prev) => [data.user, ...prev]);
+      setShowCreateUser(false);
+      setNewUserName("");
+      setNewUserEmail("");
+      setNewUserPassword("");
+      setNewUserRole("AUTH_USER");
+    } catch (err: any) {
+      setCreateUserError(err.message || "Failed to create account");
+    } finally {
+      setCreatingUser(false);
+    }
+  };
 
   // Administrative Trigger overrides
   const triggerWorker = async (name: string, endpoint: string) => {
@@ -377,6 +564,13 @@ export default function AdminDashboardPage() {
           >
             <RefreshCw className={`w-4 h-4 ${isStatsLoading ? "animate-spin" : ""}`} />
             Refresh State
+          </button>
+          <button
+            onClick={() => router.push("/profile")}
+            className="flex items-center gap-2 bg-cyber-indigo/10 border border-cyber-indigo/30 hover:bg-cyber-indigo/20 text-cyber-indigo text-xs font-bold tracking-wider uppercase font-mono-data px-4 py-2.5 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98]"
+          >
+            <UserCheck className="w-4 h-4" />
+            Profile
           </button>
           <button
             onClick={handleLogout}
@@ -714,9 +908,124 @@ export default function AdminDashboardPage() {
           </div>
         </section>
 
+        {/* 6. USER & ACCOUNT MANAGEMENT */}
+        <section className="lg:col-span-4 glass-panel rounded-2xl p-5 shadow-lg border border-indigo-950/50">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
+            <h2 className="text-lg font-bold text-white flex items-center gap-2">
+              <UserCheck className="w-5 h-5 text-cyber-cyan" />
+              User &amp; Account Management
+            </h2>
+            <div className="flex items-center gap-3">
+              {usersError && (
+                <span className="text-[10px] text-cyber-rose font-mono-data max-w-[280px] truncate" title={usersError}>
+                  {usersError}
+                </span>
+              )}
+              <span className="text-[10px] text-zinc-500 font-mono-data uppercase tracking-wider">
+                {users.length} accounts
+              </span>
+              <button
+                onClick={() => { setCreateUserError(null); setShowCreateUser(true); }}
+                className="flex items-center gap-1.5 px-3 py-2 bg-cyber-cyan/10 border border-cyber-cyan/30 hover:bg-cyber-cyan/20 rounded-xl text-cyber-cyan text-[10px] font-bold uppercase tracking-wider font-mono-data transition-all"
+              >
+                <UserPlus className="w-4 h-4" />
+                New Account
+              </button>
+              <button
+                onClick={fetchUsers}
+                title="Refresh accounts"
+                className="p-2 bg-zinc-950/60 border border-zinc-800/80 hover:bg-zinc-900 rounded-xl text-zinc-400 transition-all"
+              >
+                <RefreshCw className={`w-4 h-4 ${usersLoading ? "animate-spin" : ""}`} />
+              </button>
+            </div>
+          </div>
+
+          {usersLoading && users.length === 0 ? (
+            <div className="text-zinc-500 text-xs font-mono-data py-8 text-center uppercase tracking-wider">
+              Loading operator directory...
+            </div>
+          ) : users.length === 0 ? (
+            <div className="text-zinc-500 text-xs font-mono-data py-8 text-center uppercase tracking-wider">
+              No accounts found
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="text-[9px] text-zinc-500 uppercase tracking-widest font-mono-data border-b border-indigo-950/40">
+                    <th className="py-2.5 pr-4 font-semibold">Operator</th>
+                    <th className="py-2.5 pr-4 font-semibold">Role</th>
+                    <th className="py-2.5 pr-4 font-semibold">Status</th>
+                    <th className="py-2.5 pr-4 font-semibold">Joined</th>
+                    <th className="py-2.5 font-semibold text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {users.map((u) => {
+                    const isSelf = u.id === currentUserId;
+                    const busy = userBusyId === u.id;
+                    return (
+                      <tr key={u.id} className="border-b border-indigo-950/20 hover:bg-zinc-900/30 transition-colors">
+                        <td className="py-3 pr-4">
+                          <div className="text-xs font-semibold text-white">
+                            {u.name}
+                            {isSelf && (
+                              <span className="ml-2 text-[9px] text-cyber-cyan font-mono-data uppercase">(you)</span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-zinc-500 font-mono-data">{u.email}</div>
+                        </td>
+                        <td className="py-3 pr-4">
+                          <select
+                            value={u.role}
+                            disabled={busy || isSelf}
+                            onChange={(e) => changeUserRole(u.id, e.target.value)}
+                            className="bg-zinc-950/70 border border-zinc-800/80 rounded-lg text-[10px] font-mono-data text-zinc-200 px-2 py-1.5 uppercase tracking-wider focus:outline-none focus:border-cyber-cyan/50 disabled:opacity-50"
+                          >
+                            {["AUTH_USER", "JOURNALIST", "ADMIN", "GUEST"].map((r) => (
+                              <option key={r} value={r}>{r}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="py-3 pr-4">
+                          {u.is_blocked ? (
+                            <span className="text-[10px] font-bold font-mono-data text-cyber-rose uppercase">Blocked</span>
+                          ) : (
+                            <span className="text-[10px] font-bold font-mono-data text-cyber-emerald uppercase">Active</span>
+                          )}
+                        </td>
+                        <td className="py-3 pr-4 text-[10px] text-zinc-500 font-mono-data">
+                          {u.created_at ? new Date(u.created_at).toLocaleDateString() : "—"}
+                        </td>
+                        <td className="py-3 text-right whitespace-nowrap space-x-2">
+                          <button
+                            disabled={busy || isSelf}
+                            onClick={() => toggleUserBlock(u.id)}
+                            className="text-[10px] font-bold uppercase tracking-wider font-mono-data px-2.5 py-1.5 rounded-lg border bg-cyber-amber/10 border-cyber-amber/30 text-cyber-amber hover:bg-cyber-amber/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                          >
+                            {u.is_blocked ? "Unblock" : "Block"}
+                          </button>
+                          <button
+                            disabled={busy || isSelf}
+                            onClick={() => deleteUser(u.id)}
+                            className="text-[10px] font-bold uppercase tracking-wider font-mono-data px-2.5 py-1.5 rounded-lg border bg-cyber-rose/10 border-cyber-rose/30 text-cyber-rose hover:bg-cyber-rose/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
       </div>
 
-      {/* 6. EVENT DETAILS SLIDE OVER GLASS PANEL */}
+      {/* 7. EVENT DETAILS SLIDE OVER GLASS PANEL */}
       {selectedEvent && (
         <div className="fixed inset-y-0 right-0 w-full sm:w-[450px] glass-dossier shadow-2xl z-50 transition-all duration-300 p-6 flex flex-col justify-between border-l border-indigo-950/80">
           <div>
@@ -784,7 +1093,7 @@ export default function AdminDashboardPage() {
         </div>
       )}
 
-      {/* 7. FULL-SCREEN SKELETON SYNTHESIS OVERLAY */}
+      {/* 8. FULL-SCREEN SKELETON SYNTHESIS OVERLAY */}
       {triggerStatus.running && (
         <div className="fixed inset-0 bg-[#030712] z-[10000] flex flex-col antialiased relative overflow-hidden">
           {/* Animated Sweeping Scanning Line */}
@@ -848,6 +1157,104 @@ export default function AdminDashboardPage() {
                 </div>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 9. CREATE ACCOUNT MODAL */}
+      {showCreateUser && (
+        <div className="fixed inset-0 z-[9000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md glass-panel rounded-2xl border border-indigo-950/60 shadow-2xl p-6 relative">
+            <button
+              onClick={() => setShowCreateUser(false)}
+              disabled={creatingUser}
+              className="absolute top-4 right-4 text-zinc-400 hover:text-white bg-zinc-900 border border-zinc-800/80 p-1.5 rounded-lg transition-all disabled:opacity-40"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <h3 className="text-lg font-bold text-white flex items-center gap-2 mb-1">
+              <UserPlus className="w-5 h-5 text-cyber-cyan" />
+              New Account
+            </h3>
+            <p className="text-[10px] text-zinc-500 font-mono-data uppercase tracking-wider mb-5">
+              Provision an operator with any role
+            </p>
+
+            <form
+              onSubmit={(e) => { e.preventDefault(); handleCreateUser(); }}
+              className="space-y-4"
+            >
+              <div>
+                <label className="block text-[9px] font-bold text-zinc-500 uppercase tracking-widest font-mono-data mb-1.5">Full name</label>
+                <input
+                  required
+                  value={newUserName}
+                  onChange={(e) => setNewUserName(e.target.value)}
+                  placeholder="Jane Doe"
+                  className="w-full bg-zinc-950/70 border border-zinc-800/80 rounded-lg text-xs text-zinc-100 px-3 py-2.5 focus:outline-none focus:border-cyber-cyan/50"
+                />
+              </div>
+              <div>
+                <label className="block text-[9px] font-bold text-zinc-500 uppercase tracking-widest font-mono-data mb-1.5">Email</label>
+                <input
+                  required
+                  type="email"
+                  value={newUserEmail}
+                  onChange={(e) => setNewUserEmail(e.target.value)}
+                  placeholder="name@globelens.ai"
+                  className="w-full bg-zinc-950/70 border border-zinc-800/80 rounded-lg text-xs text-zinc-100 px-3 py-2.5 focus:outline-none focus:border-cyber-cyan/50"
+                />
+              </div>
+              <div>
+                <label className="block text-[9px] font-bold text-zinc-500 uppercase tracking-widest font-mono-data mb-1.5">Password</label>
+                <input
+                  required
+                  type="password"
+                  minLength={8}
+                  value={newUserPassword}
+                  onChange={(e) => setNewUserPassword(e.target.value)}
+                  placeholder="At least 8 characters"
+                  className="w-full bg-zinc-950/70 border border-zinc-800/80 rounded-lg text-xs text-zinc-100 px-3 py-2.5 focus:outline-none focus:border-cyber-cyan/50"
+                />
+              </div>
+              <div>
+                <label className="block text-[9px] font-bold text-zinc-500 uppercase tracking-widest font-mono-data mb-1.5">Role</label>
+                <select
+                  value={newUserRole}
+                  onChange={(e) => setNewUserRole(e.target.value)}
+                  className="w-full bg-zinc-950/70 border border-zinc-800/80 rounded-lg text-xs font-mono-data text-zinc-200 px-3 py-2.5 uppercase tracking-wider focus:outline-none focus:border-cyber-cyan/50"
+                >
+                  {["AUTH_USER", "JOURNALIST", "ADMIN", "GUEST"].map((r) => (
+                    <option key={r} value={r}>{r}</option>
+                  ))}
+                </select>
+              </div>
+
+              {createUserError && (
+                <div className="text-[10px] text-cyber-rose font-mono-data bg-cyber-rose/10 border border-cyber-rose/30 rounded-lg px-3 py-2">
+                  {createUserError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowCreateUser(false)}
+                  disabled={creatingUser}
+                  className="px-4 py-2.5 bg-zinc-900/60 border border-zinc-800/80 hover:bg-zinc-800 text-[10px] font-bold uppercase tracking-wider font-mono-data text-zinc-400 rounded-lg transition-all disabled:opacity-40"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={creatingUser}
+                  className="px-4 py-2.5 bg-cyber-cyan/10 border border-cyber-cyan/30 hover:bg-cyber-cyan/20 text-[10px] font-bold uppercase tracking-wider font-mono-data text-cyber-cyan rounded-lg transition-all disabled:opacity-40"
+                >
+                  {creatingUser ? "Creating..." : "Create account"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

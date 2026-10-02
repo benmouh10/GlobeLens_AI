@@ -10,15 +10,25 @@ The Comment table already existed and the admin router already supported
 deleting a comment, so the feature was half-built rather than unimplemented.
 """
 import uuid
+from typing import Optional
+
 from fastapi import APIRouter, Path, status, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.controllers.auth_controller import get_current_user
+from app.controllers.auth_controller import get_current_user, get_current_user_optional
 from app.core.database import get_db
-from app.entities.models import Comment, Event, User, UserRole
+from app.entities.models import (
+    Article,
+    ArticleOrigin,
+    Comment,
+    Event,
+    PublicationStatus,
+    User,
+    UserRole,
+)
 
 router = APIRouter()
 
@@ -51,10 +61,41 @@ def _serialize(comment: Comment) -> dict:
         "id": str(comment.id),
         "content": comment.content,
         "created_at": comment.created_at.isoformat() if comment.created_at else None,
-        "event_id": str(comment.event_id),
+        "event_id": str(comment.event_id) if comment.event_id else None,
+        "article_id": str(comment.article_id) if comment.article_id else None,
         "user_id": str(comment.user_id),
         "author": comment.user.name if comment.user else "Deleted user",
     }
+
+
+def _is_admin(user: Optional[User]) -> bool:
+    if user is None:
+        return False
+    role = user.role.value if hasattr(user.role, "value") else user.role
+    return role == UserRole.ADMIN.value
+
+
+async def _load_commentable_article(
+    db: AsyncSession, article_uuid: uuid.UUID, current_user: Optional[User]
+) -> Article:
+    """Return the article if its discussion is open, else raise 404.
+
+    Draft newsroom pieces stay invisible to everyone but their author and
+    admins, exactly as they are on the article endpoint itself.
+    """
+    article = await db.get(Article, article_uuid)
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    is_draft = (
+        article.origin == ArticleOrigin.AUTHORED
+        and article.publication_status == PublicationStatus.DRAFT
+    )
+    if is_draft:
+        is_owner = current_user is not None and article.author_id == current_user.id
+        if not (is_owner or _is_admin(current_user)):
+            raise HTTPException(status_code=404, detail="Article not found")
+    return article
 
 
 @router.post(
@@ -96,6 +137,46 @@ async def get_event_comments(
     )
     comments = result.scalars().all()
     return {"event_id": event_id, "comments": [_serialize(c) for c in comments], "total": len(comments)}
+
+
+@router.post(
+    "/articles/{article_id}/comments",
+    status_code=status.HTTP_201_CREATED,
+    summary="Post a comment on a newsroom article"
+)
+async def create_article_comment(
+    article_id: str = Path(...),
+    payload: CreateCommentRequest = ...,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    article_uuid = _parse_uuid(article_id, "article")
+    await _load_commentable_article(db, article_uuid, current_user)
+
+    comment = Comment(content=payload.content, article_id=article_uuid, user_id=current_user.id)
+    db.add(comment)
+    await db.commit()
+    await db.refresh(comment)
+    return {**_serialize(comment), "author": current_user.name}
+
+
+@router.get("/articles/{article_id}/comments", summary="Get all comments for a newsroom article")
+async def get_article_comments(
+    article_id: str = Path(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+):
+    article_uuid = _parse_uuid(article_id, "article")
+    await _load_commentable_article(db, article_uuid, current_user)
+
+    result = await db.execute(
+        select(Comment)
+        .where(Comment.article_id == article_uuid)
+        .options(selectinload(Comment.user))
+        .order_by(Comment.created_at.asc())
+    )
+    comments = result.scalars().all()
+    return {"article_id": article_id, "comments": [_serialize(c) for c in comments], "total": len(comments)}
 
 
 @router.put("/comments/{comment_id}", summary="Edit a comment (author only)")

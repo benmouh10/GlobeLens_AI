@@ -6,7 +6,7 @@ GET  /auth/me
 import hashlib
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
@@ -92,6 +92,25 @@ async def get_current_user(
             detail="User account has been blocked"
         )
     return user
+
+
+async def get_current_user_optional(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: AsyncSession = Depends(get_db),
+) -> Optional[User]:
+    """Return the caller when a valid token is present, otherwise None.
+
+    Some read endpoints are public but expose extra data to their owner — an
+    author previewing an unpublished draft, for instance. Reusing
+    get_current_user and swallowing its 401 keeps the two paths consistent
+    (revocation, block checks, role resolution) instead of duplicating them.
+    """
+    if credentials is None or not credentials.credentials:
+        return None
+    try:
+        return await get_current_user(credentials, db)
+    except HTTPException:
+        return None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

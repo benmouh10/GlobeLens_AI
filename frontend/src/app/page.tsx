@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import { 
   Globe, 
   MapPin, 
@@ -20,7 +21,8 @@ import {
   RefreshCw,
   Clock,
   BookOpen,
-  Bot
+  Bot,
+  LogOut
 } from "lucide-react";
 import SearchBar from "./components/SearchBar";
 import PillNav from "./components/PillNav";
@@ -48,6 +50,7 @@ interface EventItem {
 }
 
 export default function HomePage() {
+  const router = useRouter();
   const [events, setEvents] = useState<EventItem[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<EventItem | null>(null);
   const [searchActive, setSearchActive] = useState(false);
@@ -62,6 +65,10 @@ export default function HomePage() {
 
   // Chatbot Open State
   const [chatbotOpen, setChatbotOpen] = useState(false);
+
+  // Session indicator for the header logout control + role-aware navigation
+  const [authed, setAuthed] = useState(false);
+  const [userRole, setUserRole] = useState<string | null>(null);
 
 
   // Standard Feed State
@@ -82,6 +89,41 @@ export default function HomePage() {
       }
     }
   }, []);
+
+  // Surface the logout control and resolve the role once a token is present
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const token = localStorage.getItem("admin_token");
+    if (!token) return;
+    setAuthed(true);
+    fetch(`${API_BASE_URL}/api/v1/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((me) => {
+        if (me) setUserRole(me.role);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Admin console is only relevant to administrators
+  const showAdmin = userRole === "ADMIN";
+
+  const handleLogout = async () => {
+    const token = localStorage.getItem("admin_token");
+    try {
+      if (token) {
+        await fetch(`${API_BASE_URL}/api/v1/auth/logout`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        }).catch(() => {});
+      }
+    } finally {
+      localStorage.removeItem("admin_token");
+      document.cookie = "admin_token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT;";
+      router.push("/login");
+    }
+  };
 
   // Fetch events based on viewMode and pagination
   const fetchEvents = async (page = 1) => {
@@ -209,8 +251,9 @@ export default function HomePage() {
                   }
                 }
               },
-              { label: 'Admin', href: '/admin/dashboard' },
-              { label: 'Fact Checker', href: '/fact-checker' }
+              { label: 'Profile', href: '/profile' },
+              ...(showAdmin ? [{ label: 'Admin', href: '/admin/dashboard' }] : []),
+              { label: 'Dispatches', href: '/dispatches' }, { label: 'Fact Checker', href: '/fact-checker' }
             ]}
             activeHref={viewMode === "standard" ? "/?view=standard" : "/?view=map"}
             baseColor="#080c16"
@@ -225,6 +268,15 @@ export default function HomePage() {
               onSearchResults={handleSearchResults} 
               onClearSearch={handleClearSearch} 
             />
+            {authed && (
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-2 bg-cyber-rose/10 border border-cyber-rose/30 hover:bg-cyber-rose/20 text-cyber-rose text-[11px] font-bold tracking-wider uppercase font-mono-data px-3 py-2 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98]"
+              >
+                <LogOut className="w-4 h-4" />
+                Logout
+              </button>
+            )}
           </div>
         </header>
 
@@ -327,8 +379,9 @@ export default function HomePage() {
                 }
               }
             },
-            { label: 'Admin', href: '/admin/dashboard' },
-            { label: 'Fact Checker', href: '/fact-checker' }
+            { label: 'Profile', href: '/profile' },
+            ...(showAdmin ? [{ label: 'Admin', href: '/admin/dashboard' }] : []),
+            { label: 'Dispatches', href: '/dispatches' }, { label: 'Fact Checker', href: '/fact-checker' }
           ]}
           activeHref={viewMode === "standard" ? "/?view=standard" : "/?view=map"}
           baseColor="#080c16"
@@ -343,6 +396,15 @@ export default function HomePage() {
             onSearchResults={handleSearchResults} 
             onClearSearch={handleClearSearch} 
           />
+          {authed && (
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-2 bg-cyber-rose/10 border border-cyber-rose/30 hover:bg-cyber-rose/20 text-cyber-rose text-[11px] font-bold tracking-wider uppercase font-mono-data px-3 py-2 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98]"
+            >
+              <LogOut className="w-4 h-4" />
+              Logout
+            </button>
+          )}
         </div>
       </header>
 

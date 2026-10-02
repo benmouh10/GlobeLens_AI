@@ -22,7 +22,8 @@ import {
   CheckCircle,
   ExternalLink,
   Newspaper,
-  Share2
+  Share2,
+  Send
 } from "lucide-react";
 import PillNav from "../../components/PillNav";
 
@@ -107,6 +108,15 @@ interface FactCheckResult {
   summary: string;
 }
 
+interface CommentItem {
+  id: string;
+  content: string;
+  created_at: string | null;
+  event_id: string;
+  user_id: string;
+  author: string;
+}
+
 export default function EventDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -118,10 +128,22 @@ export default function EventDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [isBookmarked, setIsBookmarked] = useState(false);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [userRole, setUserRole] = useState<string | null>(null);
   const [bookmarkPending, setBookmarkPending] = useState(false);
   
   const [factCheck, setFactCheck] = useState<FactCheckResult | null>(null);
   const [factCheckLoading, setFactCheckLoading] = useState(false);
+
+  // Comments are public to read; only posting/editing/deleting needs a token.
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [comments, setComments] = useState<CommentItem[]>([]);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [newComment, setNewComment] = useState("");
+  const [posting, setPosting] = useState(false);
+  const [commentError, setCommentError] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
+  const [commentBusyId, setCommentBusyId] = useState<string | null>(null);
   
 
   
@@ -173,9 +195,18 @@ export default function EventDetailPage() {
       const token = localStorage.getItem("admin_token");
       if (!token) return;
       if (!cancelled) setAuthToken(token);
+      fetch(`${API_BASE_URL}/api/v1/auth/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((me) => {
+          if (!cancelled && me) setUserRole(me.role);
+        })
+        .catch(() => {});
 
       try {
         const userId = await resolveUserId(token);
+        if (!cancelled) setCurrentUserId(userId);
         const res = await fetch(`${API_BASE_URL}/api/v1/users/${userId}/bookmarks`, {
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -266,6 +297,147 @@ export default function EventDetailPage() {
       console.error(err);
     } finally {
       setFactCheckLoading(false);
+    }
+  };
+
+  // Comments are readable without a session, so this runs for everyone.
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+
+    const loadComments = async () => {
+      setCommentsLoading(true);
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/v1/events/${id}/comments`);
+        if (res.ok && !cancelled) {
+          const data = await res.json();
+          setComments(data.comments || []);
+        }
+      } catch (err) {
+        console.error("Could not load comments", err);
+      } finally {
+        if (!cancelled) setCommentsLoading(false);
+      }
+    };
+
+    loadComments();
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  const handlePostComment = async () => {
+    if (!authToken) {
+      router.push("/login");
+      return;
+    }
+    const content = newComment.trim();
+    if (!content || posting) return;
+
+    setPosting(true);
+    setCommentError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/events/${id}/comments`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ content }),
+      });
+
+      if (res.status === 401) {
+        localStorage.removeItem("admin_token");
+        setAuthToken(null);
+        router.push("/login");
+        return;
+      }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Could not post comment");
+      }
+
+      const created = await res.json();
+      setComments((prev) => [...prev, created]);
+      setNewComment("");
+    } catch (err: any) {
+      setCommentError(err.message || "Could not post comment");
+    } finally {
+      setPosting(false);
+    }
+  };
+
+  const handleUpdateComment = async (commentId: string) => {
+    if (!authToken) return;
+    const content = editText.trim();
+    if (!content) {
+      setCommentError("Comment cannot be empty");
+      return;
+    }
+
+    setCommentBusyId(commentId);
+    setCommentError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/comments/${commentId}`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ content }),
+      });
+
+      if (res.status === 401) {
+        localStorage.removeItem("admin_token");
+        setAuthToken(null);
+        router.push("/login");
+        return;
+      }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Could not update comment");
+      }
+
+      const updated = await res.json();
+      setComments((prev) =>
+        prev.map((c) => (c.id === commentId ? { ...c, content: updated.content } : c))
+      );
+      setEditingId(null);
+      setEditText("");
+    } catch (err: any) {
+      setCommentError(err.message || "Could not update comment");
+    } finally {
+      setCommentBusyId(null);
+    }
+  };
+
+  const handleDeleteComment = async (commentId: string) => {
+    if (!authToken) return;
+    if (!window.confirm("Delete this comment?")) return;
+
+    setCommentBusyId(commentId);
+    setCommentError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/comments/${commentId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+
+      if (res.status === 401) {
+        localStorage.removeItem("admin_token");
+        setAuthToken(null);
+        router.push("/login");
+        return;
+      }
+      // A 404 means it is already gone, which is the desired end state.
+      if (!res.ok && res.status !== 404) {
+        throw new Error("Could not delete comment");
+      }
+      setComments((prev) => prev.filter((c) => c.id !== commentId));
+    } catch (err: any) {
+      setCommentError(err.message || "Could not delete comment");
+    } finally {
+      setCommentBusyId(null);
     }
   };
 
@@ -397,6 +569,9 @@ export default function EventDetailPage() {
     return rendered;
   };
 
+  // Admin console is only relevant to administrators
+  const showAdmin = userRole === "ADMIN";
+
   // Loading skeleton matching loading_feed_globelens_ai aesthetic
   if (loading) {
     return (
@@ -446,8 +621,9 @@ export default function EventDetailPage() {
                   router.push('/?view=map');
                 }
               },
-              { label: 'Admin', href: '/admin/dashboard' },
-              { label: 'Fact Checker', href: '/fact-checker' }
+              { label: 'Profile', href: '/profile' },
+              ...(showAdmin ? [{ label: 'Admin', href: '/admin/dashboard' }] : []),
+              { label: 'Dispatches', href: '/dispatches' }, { label: 'Fact Checker', href: '/fact-checker' }
             ]}
             activeHref=""
             baseColor="#080c16"
@@ -523,8 +699,9 @@ export default function EventDetailPage() {
               href: '/?view=map',
               onClick: (e) => { e.preventDefault(); router.push('/?view=map'); }
             },
-            { label: 'Admin', href: '/admin/dashboard' },
-            { label: 'Fact Checker', href: '/fact-checker' }
+            { label: 'Profile', href: '/profile' },
+            ...(showAdmin ? [{ label: 'Admin', href: '/admin/dashboard' }] : []),
+            { label: 'Dispatches', href: '/dispatches' }, { label: 'Fact Checker', href: '/fact-checker' }
           ]}
           activeHref=""
           baseColor="#080c16"
@@ -803,6 +980,163 @@ export default function EventDetailPage() {
                 </div>
               )}
             </div>
+          </section>
+
+          {/* Discussion — anyone can read, a session is required to post */}
+          <section className="space-y-4">
+            <h3 className="font-label-caps text-label-caps text-zinc-400 uppercase tracking-widest text-[11px] flex items-center gap-1.5">
+              <span className="material-symbols-outlined text-[16px] text-primary">forum</span>
+              Discussion ({comments.length})
+            </h3>
+
+            {commentsLoading && (
+              <div className="flex items-center gap-2 text-primary text-xs font-mono-data animate-pulse py-2">
+                <RefreshCw className="w-4 h-4 animate-spin" /> Loading discussion...
+              </div>
+            )}
+
+            {!commentsLoading && comments.length === 0 && (
+              <p className="text-sm text-zinc-500">No comments yet. Start the discussion.</p>
+            )}
+
+            {comments.length > 0 && (
+              <div className="space-y-3">
+                {comments.map((c) => {
+                  const mine = !!currentUserId && c.user_id === currentUserId;
+                  const editing = editingId === c.id;
+                  return (
+                    <div key={c.id} className="bg-zinc-950/40 border border-zinc-900 rounded-xl p-4">
+                      <div className="flex items-center justify-between gap-3 mb-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="w-6 h-6 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center font-mono-data text-[9px] text-primary font-bold flex-shrink-0">
+                            {(c.author || "?").slice(0, 2).toUpperCase()}
+                          </div>
+                          <span className="text-xs font-semibold text-primary truncate">{c.author}</span>
+                          {mine && (
+                            <span className="text-[9px] uppercase tracking-wider text-zinc-500 font-mono-data">
+                              You
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[10px] text-zinc-500 font-mono-data flex-shrink-0">
+                          {c.created_at
+                            ? new Date(c.created_at).toLocaleString("en-GB", {
+                                day: "2-digit",
+                                month: "short",
+                                year: "numeric",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })
+                            : ""}
+                        </span>
+                      </div>
+
+                      {editing ? (
+                        <div className="space-y-2">
+                          <textarea
+                            value={editText}
+                            onChange={(e) => setEditText(e.target.value)}
+                            rows={3}
+                            className="w-full bg-zinc-950/60 border border-outline-variant rounded-lg p-3 text-sm text-zinc-200 focus:outline-none focus:border-primary transition-colors resize-y"
+                          />
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleUpdateComment(c.id)}
+                              disabled={commentBusyId === c.id}
+                              className="px-3 py-1.5 bg-primary/10 hover:bg-primary/20 border border-primary/30 text-primary rounded text-[10px] font-bold uppercase tracking-wider font-mono-data disabled:opacity-60"
+                            >
+                              {commentBusyId === c.id ? "Saving..." : "Save"}
+                            </button>
+                            <button
+                              onClick={() => {
+                                setEditingId(null);
+                                setEditText("");
+                              }}
+                              className="px-3 py-1.5 bg-zinc-900/60 hover:bg-zinc-800/80 border border-zinc-800 text-zinc-300 rounded text-[10px] font-bold uppercase tracking-wider font-mono-data"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                            {c.content}
+                          </p>
+                          {mine && (
+                            <div className="flex gap-3 mt-2 print:hidden">
+                              <button
+                                onClick={() => {
+                                  setEditingId(c.id);
+                                  setEditText(c.content);
+                                  setCommentError(null);
+                                }}
+                                className="text-[10px] uppercase tracking-wider font-mono-data text-zinc-500 hover:text-primary transition-colors"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => handleDeleteComment(c.id)}
+                                disabled={commentBusyId === c.id}
+                                className="text-[10px] uppercase tracking-wider font-mono-data text-zinc-500 hover:text-cyber-rose transition-colors disabled:opacity-60"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {authToken ? (
+              <div className="space-y-2">
+                <textarea
+                  value={newComment}
+                  onChange={(e) => setNewComment(e.target.value)}
+                  rows={3}
+                  maxLength={4000}
+                  placeholder="Share your analysis..."
+                  className="w-full bg-zinc-950/40 border border-zinc-800 rounded-lg p-3 text-sm text-zinc-200 focus:outline-none focus:border-primary transition-colors resize-y placeholder:text-zinc-700"
+                />
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[10px] text-zinc-600 font-mono-data">
+                    {newComment.length}/4000
+                  </span>
+                  <button
+                    onClick={handlePostComment}
+                    disabled={posting || !newComment.trim()}
+                    className="flex items-center gap-2 px-4 py-2 bg-primary/10 hover:bg-primary/20 border border-primary/30 text-primary rounded text-xs font-bold uppercase tracking-wider font-mono-data disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {posting ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Send className="w-3.5 h-3.5" />
+                    )}
+                    {posting ? "Posting..." : "Post Comment"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="p-4 bg-zinc-950/40 border border-dashed border-zinc-800 rounded-xl flex flex-wrap items-center justify-between gap-3">
+                <span className="text-sm text-zinc-400">Sign in to join the discussion.</span>
+                <button
+                  onClick={() => router.push("/login")}
+                  className="px-4 py-2 bg-primary/10 hover:bg-primary/20 border border-primary/30 text-primary rounded text-xs font-bold uppercase tracking-wider font-mono-data"
+                >
+                  Sign In
+                </button>
+              </div>
+            )}
+
+            {commentError && (
+              <div className="p-3 rounded-lg bg-cyber-rose/10 border border-cyber-rose/30 text-cyber-rose text-xs font-mono-data uppercase tracking-wider">
+                {commentError}
+              </div>
+            )}
           </section>
 
         </main>
