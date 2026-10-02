@@ -3,14 +3,35 @@ GlobeLens AI — EventRepository
 Async SQLAlchemy repository for Event entity — the core aggregation unit.
 """
 import uuid
+import math
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Union
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-from app.entities.models import Event, Article, Embedding
+from app.entities.models import Event, Article, Embedding, EventContradiction
 from app.schemas.intelligence import EventIntelligenceResponse
+
+
+def _finite_coord(value: object, limit: float) -> Optional[float]:
+    """
+    Return a coordinate only when it is a finite number inside its valid range.
+
+    The model can emit huge/garbage numbers (e.g. longitude 1e999 -> inf); such
+    values are stored fine by Postgres but then blow up JSON serialization with
+    "Out of range float values are not JSON compliant: inf", taking down the
+    public /events list. Anything not finite or out of range is dropped.
+    """
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or abs(value) > limit:
+        return None
+    return value
+
 
 
 class EventRepository:
@@ -114,6 +135,40 @@ class EventRepository:
         )
         return list(result.scalars().all())
 
+    async def replace_contradictions(
+        self,
+        event_id: uuid.UUID,
+        rows: List[dict],
+    ) -> int:
+        """
+        Replace the recorded contradictions for an event with ``rows``.
+
+        Replaces rather than appends: rescanning an event whose articles have
+        not changed should be a no-op, and appending would accumulate stale
+        flags from earlier scans whose claims no longer exist.
+        """
+        async with self._session.begin_nested():
+            # selectinload, not session.get: clearing the relationship would
+            # lazy-load inside async context and raise MissingGreenlet.
+            event = (
+                await self._session.execute(
+                    select(Event)
+                    .where(Event.id == event_id)
+                    .options(selectinload(Event.contradictions))
+                )
+            ).scalars().first()
+            if not event:
+                raise ValueError(f"Event with id {event_id} not found")
+
+            event.contradictions.clear()
+            await self._session.flush()
+
+            for row in rows:
+                event.contradictions.append(EventContradiction(**row))
+            await self._session.flush()
+
+        return len(rows)
+
     async def update_event_intelligence(self, event_id: uuid.UUID, intelligence_data: Union[dict, EventIntelligenceResponse]) -> None:
         """
         Saves the generated summary, topic, bias_lean, country, latitude, and longitude,
@@ -158,8 +213,8 @@ class EventRepository:
                 event.bias_lean = bias_lean_val
                 
             event.country = country
-            event.latitude = latitude
-            event.longitude = longitude
+            event.latitude = _finite_coord(latitude, 90.0)
+            event.longitude = _finite_coord(longitude, 180.0)
             if importance_score is not None:
                 event.importance_score = importance_score
                 

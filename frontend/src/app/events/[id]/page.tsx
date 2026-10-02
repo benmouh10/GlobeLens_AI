@@ -21,24 +21,54 @@ import {
   BookOpen,
   CheckCircle,
   ExternalLink,
-  Newspaper
+  Newspaper,
+  Share2
 } from "lucide-react";
 import PillNav from "../../components/PillNav";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// Cached per token so a user flipping bookmarks across several dossiers does
+// not re-fetch the profile each time.
+let cachedUserId: { token: string; id: string } | null = null;
+
+async function resolveUserId(token: string): Promise<string> {
+  if (cachedUserId && cachedUserId.token === token) return cachedUserId.id;
+  const res = await fetch(`${API_BASE_URL}/api/v1/auth/me`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`Profile lookup failed (${res.status})`);
+  const profile = await res.json();
+  cachedUserId = { token, id: profile.id };
+  return profile.id as string;
+}
+
 interface Source {
   name: string;
   credibility_score: number;
+  bias_lean: string;
 }
 
 interface Article {
   id: string;
+  // 1-based position in the list the LLM was shown, which only includes
+  // articles that had a body. Null means the article cannot be cited.
+  citation_index: number | null;
   title: string;
   content: string;
   url: string;
   published_at?: string;
   source: Source;
+}
+
+interface Contradiction {
+  // Candidate disagreement between sources, not a verified ruling. The
+  // detector surfaces pairs a reader should weigh; it does not decide
+  // which outlet is right, and the UI must not imply that it does.
+  nature: string;
+  detail: string;
+  claim_a: { text: string; source: string };
+  claim_b: { text: string; source: string };
 }
 
 interface EventDetail {
@@ -53,7 +83,28 @@ interface EventDetail {
   bias_lean: string;
   status: string;
   created_at?: string;
+  updated_at?: string;
   articles: Article[];
+  contradictions: Contradiction[];
+}
+
+interface RelatedEvent {
+  id: string;
+  title: string;
+  topic: string;
+  created_at: string;
+}
+
+interface FactCheckClaim {
+  text: string;
+  status: string;
+}
+
+interface FactCheckResult {
+  credibility_score: number;
+  trust_risks: string[];
+  claims: FactCheckClaim[];
+  summary: string;
 }
 
 export default function EventDetailPage() {
@@ -62,9 +113,15 @@ export default function EventDetailPage() {
   const id = params.id as string;
   
   const [event, setEvent] = useState<EventDetail | null>(null);
+  const [relatedEvents, setRelatedEvents] = useState<RelatedEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isBookmarked, setIsBookmarked] = useState(false);
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [bookmarkPending, setBookmarkPending] = useState(false);
+  
+  const [factCheck, setFactCheck] = useState<FactCheckResult | null>(null);
+  const [factCheckLoading, setFactCheckLoading] = useState(false);
   
 
   
@@ -81,6 +138,17 @@ export default function EventDetailPage() {
       }
       const data = await response.json();
       setEvent(data);
+      
+      // Fetch related
+      try {
+        const relatedRes = await fetch(`${API_BASE_URL}/api/v1/events/${id}/related`);
+        if (relatedRes.ok) {
+          const relatedData = await relatedRes.json();
+          setRelatedEvents(relatedData.events || []);
+        }
+      } catch (e) {
+        console.error("Failed to fetch related events", e);
+      }
     } catch (err: any) {
       console.error(err);
       setError(err.message || "Failed to connect to synthesis server");
@@ -95,8 +163,131 @@ export default function EventDetailPage() {
     }
   }, [id]);
 
-  const handleBookmarkToggle = () => {
-    setIsBookmarked(!isBookmarked);
+  // Restore the saved state from the server. localStorage is read in an effect
+  // rather than during render because this is a client component and reading
+  // storage during render breaks server rendering.
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadBookmarkState = async () => {
+      const token = localStorage.getItem("admin_token");
+      if (!token) return;
+      if (!cancelled) setAuthToken(token);
+
+      try {
+        const userId = await resolveUserId(token);
+        const res = await fetch(`${API_BASE_URL}/api/v1/users/${userId}/bookmarks`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        const ids = new Set<string>(
+          (data.bookmarks || []).map((b: { event_id: string }) => b.event_id)
+        );
+        setIsBookmarked(ids.has(id));
+      } catch (err) {
+        // A failed lookup must not block the dossier itself.
+        console.error("Could not load bookmark state", err);
+      }
+    };
+
+    loadBookmarkState();
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  const handleBookmarkToggle = async () => {
+    // Honest failure first: the event page is public, so most visitors have no
+    // token. Previously this toggled local state only, so the button claimed
+    // "Saved to Dossiers" while nothing was persisted anywhere.
+    if (!authToken) {
+      alert("Sign in to save dossiers to your account.");
+      router.push("/login");
+      return;
+    }
+    if (bookmarkPending) return;
+
+    setBookmarkPending(true);
+    const previous = isBookmarked;
+    // Optimistic, but reverted below if the request fails.
+    setIsBookmarked(!previous);
+
+    try {
+      const userId = await resolveUserId(authToken);
+      const res = await fetch(
+        previous
+          ? `${API_BASE_URL}/api/v1/users/${userId}/bookmarks/${id}`
+          : `${API_BASE_URL}/api/v1/users/${userId}/bookmarks`,
+        {
+          method: previous ? "DELETE" : "POST",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: previous ? undefined : JSON.stringify({ event_id: id }),
+        }
+      );
+
+      if (res.status === 401) {
+        // Token expired or was revoked mid-session.
+        localStorage.removeItem("admin_token");
+        setAuthToken(null);
+        setIsBookmarked(false);
+        alert("Your session expired. Sign in again to save dossiers.");
+        router.push("/login");
+        return;
+      }
+
+      if (!res.ok) {
+        throw new Error(`Bookmark request failed (${res.status})`);
+      }
+    } catch (err) {
+      // Never leave the UI claiming a save that did not happen.
+      setIsBookmarked(previous);
+      console.error("Bookmark toggle failed", err);
+      alert("Could not update bookmarks. Please try again.");
+    } finally {
+      setBookmarkPending(false);
+    }
+  };
+
+  const handleRunFactCheck = async () => {
+    if (factCheck || factCheckLoading) return;
+    setFactCheckLoading(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/events/${id}/fact-check`);
+      if (res.ok) {
+        const data = await res.json();
+        setFactCheck(data);
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setFactCheckLoading(false);
+    }
+  };
+
+  const handlePrint = () => {
+    window.print();
+  };
+
+  const handleShare = async () => {
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: event?.title || 'GlobeLens AI Dossier',
+          text: 'Read this intelligence dossier on GlobeLens AI',
+          url: window.location.href,
+        });
+      } catch (err) {
+        console.error('Error sharing', err);
+      }
+    } else {
+      navigator.clipboard.writeText(window.location.href);
+      alert('Link copied to clipboard!');
+    }
   };
 
   // Helper to get topic badge style
@@ -120,56 +311,90 @@ export default function EventDetailPage() {
     }
   };
 
-  // Helper to render body content with hover citations
   const renderCitationsParagraphs = (summaryText: string, articlesList: Article[]) => {
     if (!summaryText) return <p className="text-zinc-500 italic">No summary details compiled yet.</p>;
 
     const paragraphs = summaryText.split("\n\n").filter(p => p.trim().length > 0);
-    
-    return paragraphs.map((para, pIdx) => {
-      // Only add one citation per paragraph — on the last sentence — to avoid flooding the text
-      const sentences = para.split(/(?<=\. )/g);
-      const lastSentenceIdx = sentences.length - 1;
-      // Pick a different article for each paragraph
-      const articleIndex = pIdx % (articlesList.length || 1);
-      const associatedArticle = articlesList.length > 0 ? articlesList[articleIndex] : null;
+
+    // Resolve [N] through the server's citation_index rather than N-1
+    // positionally. Enrichment only numbered articles that had a body, so
+    // array position and citation number drift apart on any event containing a
+    // content-less article, which silently attributed claims to the wrong
+    // source.
+    const byCitationIndex = new Map<number, Article>();
+    for (const art of articlesList) {
+      if (art.citation_index != null) {
+        byCitationIndex.set(art.citation_index, art);
+      }
+    }
+    const danglingCitations: number[] = [];
+
+    const rendered = paragraphs.map((para, pIdx) => {
+      // Parse [1], [2], etc. to inline tooltip citations
+      const parts = para.split(/(\[\d+\])/g);
 
       return (
         <p key={pIdx} className="mb-6 text-on-surface leading-[1.8] text-body-lg font-body-lg">
-          {sentences.map((sentence, sIdx) => {
-            // Only cite on the last sentence of each paragraph
-            const shouldCite = associatedArticle && sIdx === lastSentenceIdx;
+          {parts.map((part, sIdx) => {
+            const match = part.match(/\[(\d+)\]/);
+            if (match) {
+              const associatedArticle = byCitationIndex.get(parseInt(match[1]));
 
-            if (shouldCite && associatedArticle) {
-              const trustPercent = Math.round((associatedArticle.source.credibility_score || 0.85) * 100);
-              
+              if (associatedArticle) {
+                const trustPercent = Math.round((associatedArticle.source.credibility_score || 0.85) * 100);
+                
+                return (
+                  <a 
+                    key={sIdx}
+                    href={associatedArticle.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="has-tooltip inline-flex items-center justify-center bg-zinc-800 hover:bg-primary text-[10px] text-zinc-300 hover:text-white rounded px-1 ml-0.5 align-super transition-colors duration-150 cursor-pointer"
+                  >
+                    {match[1]}
+                    <span className="ai-tooltip glass-panel p-3 rounded text-left shadow-[0_8px_24px_rgba(0,0,0,0.6)] min-w-[250px] z-50">
+                      <strong className="block text-primary font-mono-data mb-1.5 flex items-center gap-1.5 text-xs">
+                        <span className="material-symbols-outlined text-[14px]">source</span> 
+                        {associatedArticle.source.name} ({trustPercent}% trust)
+                      </strong>
+                      <span className="block text-xs font-semibold text-white mb-1 leading-tight">
+                        {associatedArticle.title}
+                      </span>
+                      <span className="block text-[10px] text-zinc-400 mt-2 flex items-center gap-1">
+                        Click to view original source <ExternalLink className="w-3 h-3" />
+                      </span>
+                    </span>
+                  </a>
+                );
+              }
+
+              // The model cited a source number this event does not have. Show
+              // the marker plainly instead of dropping it, so a broken
+              // citation is visible rather than silently removed.
+              danglingCitations.push(parseInt(match[1]));
               return (
-                <span 
+                <span
                   key={sIdx}
-                  className="has-tooltip inline border-b border-dashed border-primary/50 cursor-help text-on-surface hover:text-white transition-colors duration-150"
+                  title={`Citation [${match[1]}] does not match any source on this event`}
+                  className="inline-flex items-center justify-center bg-amber-500/10 text-amber-400 text-[10px] rounded px-1 ml-0.5 align-super border border-amber-500/30"
                 >
-                  {sentence}
-                  <span className="ai-tooltip glass-panel p-3 rounded text-left shadow-[0_8px_24px_rgba(0,0,0,0.6)]">
-                    <strong className="block text-primary font-mono-data mb-1.5 flex items-center gap-1.5 text-xs">
-                      <span className="material-symbols-outlined text-[14px]">source</span> 
-                      {associatedArticle.source.name} ({trustPercent}% trust)
-                    </strong>
-                    <span className="block text-xs font-semibold text-white mb-1 leading-tight">
-                      {associatedArticle.title}
-                    </span>
-                    <span className="block text-[10px] text-zinc-400">
-                      Cross-referenced via GlobeLens search verification protocols.
-                    </span>
-                  </span>
+                  {match[1]}?
                 </span>
               );
             }
-            
-            return <span key={sIdx}>{sentence}</span>;
+            return <span key={sIdx}>{part}</span>;
           })}
         </p>
       );
     });
+
+    if (danglingCitations.length > 0 && process.env.NODE_ENV === "development") {
+      console.warn(
+        `Event summary cites sources that do not exist: ${Array.from(new Set(danglingCitations)).join(", ")}`
+      );
+    }
+
+    return rendered;
   };
 
   // Loading skeleton matching loading_feed_globelens_ai aesthetic
@@ -338,18 +563,54 @@ export default function EventDetailPage() {
                 </div>
               </div>
 
-              {/* Bookmark Toggle */}
-              <button 
-                onClick={handleBookmarkToggle}
-                className={`flex items-center gap-2 px-3 py-1.5 bg-surface-container border rounded font-body-sm text-body-sm transition-colors ${
-                  isBookmarked 
-                    ? "border-primary text-primary" 
-                    : "border-outline-variant text-on-surface hover:border-primary"
-                }`}
-              >
-                <Bookmark className={`w-[18px] h-[18px] ${isBookmarked ? "fill-primary" : ""}`} />
-                <span>{isBookmarked ? "Saved to Dossiers" : "Bookmark Intel"}</span>
-              </button>
+              <div className="flex items-center gap-2 print:hidden">
+                {/* Share Toggle */}
+                <button 
+                  onClick={handleShare}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-surface-container border border-outline-variant text-on-surface hover:border-primary rounded font-body-sm text-body-sm transition-colors"
+                  title="Share Dossier"
+                >
+                  <Share2 className="w-[18px] h-[18px]" />
+                  <span>Share</span>
+                </button>
+
+                {/* Print/Export Toggle */}
+                <button 
+                  onClick={handlePrint}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-surface-container border border-outline-variant text-on-surface hover:border-primary rounded font-body-sm text-body-sm transition-colors"
+                  title="Export to PDF"
+                >
+                  <FileText className="w-[18px] h-[18px]" />
+                  <span>Export</span>
+                </button>
+
+                {/* Bookmark Toggle */}
+                <button
+                  onClick={handleBookmarkToggle}
+                  disabled={bookmarkPending}
+                  title={
+                    authToken
+                      ? isBookmarked
+                        ? "Remove this dossier from your saved list"
+                        : "Save this dossier to your list"
+                      : "Sign in to save dossiers"
+                  }
+                  className={`flex items-center gap-2 px-3 py-1.5 bg-surface-container border rounded font-body-sm text-body-sm transition-colors disabled:opacity-60 disabled:cursor-wait ${
+                    isBookmarked
+                      ? "border-primary text-primary"
+                      : "border-outline-variant text-on-surface hover:border-primary"
+                  }`}
+                >
+                  <Bookmark className={`w-[18px] h-[18px] ${isBookmarked ? "fill-primary" : ""}`} />
+                  <span>
+                    {bookmarkPending
+                      ? "Saving..."
+                      : isBookmarked
+                      ? "Saved to Dossiers"
+                      : "Bookmark Intel"}
+                  </span>
+                </button>
+              </div>
             </div>
 
             {/* Headline & Summary */}
@@ -422,6 +683,70 @@ export default function EventDetailPage() {
             </article>
           </div>
 
+          {/* Cross-Source Contradictions */}
+          {event.contradictions && event.contradictions.length > 0 && (
+            <div className="border-b border-outline-variant/40 pb-6">
+              <h3 className="font-label-caps text-label-caps text-zinc-500 uppercase tracking-widest text-[10px] mb-4 flex items-center gap-2">
+                <span className="material-symbols-outlined text-[14px] text-amber-500">compare_arrows</span>
+                Sources Disagree
+              </h3>
+              <p className="text-xs text-zinc-500 mb-4 max-w-3xl">
+                Automated comparison found claims that differ between outlets.
+                These are flagged for review, not resolved: read both passages and
+                judge which reporting holds up.
+              </p>
+              <div className="space-y-4 max-w-3xl">
+                {event.contradictions.map((c, i) => (
+                  <div
+                    key={`${c.nature}-${i}`}
+                    className="border-l-2 border-amber-500/60 bg-amber-500/5 pl-4 py-3"
+                  >
+                    <p className="text-[11px] font-mono-data text-amber-400/90 mb-3">
+                      {c.detail}
+                    </p>
+                    <div className="space-y-2">
+                      <blockquote className="text-sm text-zinc-300 border-l border-zinc-600 pl-3">
+                        <span className="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">
+                          {c.claim_a.source}
+                        </span>
+                        {c.claim_a.text}
+                      </blockquote>
+                      <blockquote className="text-sm text-zinc-300 border-l border-zinc-600 pl-3">
+                        <span className="text-[10px] uppercase tracking-wider text-zinc-500 block mb-1">
+                          {c.claim_b.source}
+                        </span>
+                        {c.claim_b.text}
+                      </blockquote>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Related Events Timeline */}
+          {relatedEvents.length > 0 && (
+            <div className="pt-2 pb-6 border-b border-outline-variant/40 print:hidden">
+              <h3 className="text-[11px] text-zinc-400 font-bold uppercase tracking-widest mb-6 flex items-center gap-2 font-label-caps">
+                <span className="material-symbols-outlined text-[16px] text-primary">timeline</span>
+                Related Intelligence
+              </h3>
+              <div className="space-y-4">
+                {relatedEvents.map((re) => (
+                  <div key={re.id} className="relative pl-6 border-l border-primary/50 py-1">
+                    <div className="absolute left-[-5px] top-3 w-2 h-2 rounded-full bg-primary shadow-[0_0_8px_rgba(6,182,212,0.6)]"></div>
+                    <span className="text-[10px] text-zinc-500 font-mono-data mb-1 block">
+                      {re.created_at ? new Date(re.created_at).toLocaleDateString() : 'N/A'}
+                    </span>
+                    <a href={`/events/${re.id}`} className="text-sm font-semibold text-zinc-200 hover:text-white hover:underline transition-colors leading-snug">
+                      {re.title}
+                    </a>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Cross-References & Source List */}
           <section className="space-y-4">
             <h3 className="font-label-caps text-label-caps text-zinc-400 uppercase tracking-widest text-[11px] flex items-center gap-1.5">
@@ -442,9 +767,20 @@ export default function EventDetailPage() {
                         <span className="font-mono-data text-[10px] px-2 py-0.5 rounded bg-zinc-900 text-zinc-400 font-bold border border-zinc-800 uppercase">
                           {art.source.name}
                         </span>
-                        <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
-                          <CheckCircle className="w-3 h-3" /> {percent}% Trust
-                        </span>
+                        <div className="flex flex-col items-end gap-1">
+                          <span className="text-[10px] font-bold text-emerald-400 flex items-center gap-1">
+                            <CheckCircle className="w-3 h-3" /> {percent}% Trust
+                          </span>
+                          <span className={`text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${
+                            art.source.bias_lean === 'LEFT' ? 'text-blue-400 bg-blue-500/10 border-blue-500/30' :
+                            art.source.bias_lean === 'CENTER_LEFT' ? 'text-blue-200 bg-blue-300/10 border-blue-300/30' :
+                            art.source.bias_lean === 'CENTER_RIGHT' ? 'text-red-200 bg-red-300/10 border-red-300/30' :
+                            art.source.bias_lean === 'RIGHT' ? 'text-red-400 bg-red-500/10 border-red-500/30' :
+                            'text-zinc-400 bg-zinc-500/10 border-zinc-500/30'
+                          }`}>
+                            {art.source.bias_lean.replace('_', ' ')}
+                          </span>
+                        </div>
                       </div>
                       <h4 className="text-sm font-semibold text-white leading-snug mb-3">
                         {art.title}
@@ -508,6 +844,86 @@ export default function EventDetailPage() {
             </div>
           </div>
 
+          {/* Transparency Panel */}
+          <div className="bg-zinc-900/60 border border-zinc-800/60 rounded-lg p-3 mb-4 flex flex-col gap-2">
+            <h3 className="text-xs text-zinc-400 font-bold uppercase tracking-widest flex items-center gap-1.5 mb-1">
+              <span className="material-symbols-outlined text-[14px]">visibility</span>
+              Transparency Panel
+            </h3>
+            <div className="flex justify-between items-center text-xs">
+              <span className="text-zinc-500">Last Updated</span>
+              <span className="text-zinc-200">{event.updated_at ? new Date(event.updated_at).toLocaleDateString() : 'N/A'}</span>
+            </div>
+            <div className="flex justify-between items-center text-xs">
+              <span className="text-zinc-500">Sources Used</span>
+              <span className="text-zinc-200">{event.articles.length} verified</span>
+            </div>
+            <div className="flex justify-between items-center text-xs">
+              <span className="text-zinc-500">Contradictions</span>
+              <span className="text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">0 detected</span>
+            </div>
+            <div className="flex justify-between items-center text-xs">
+              <span className="text-zinc-500">Editor Confidence</span>
+              <span className="text-zinc-200">{avgTrustScore}%</span>
+            </div>
+          </div>
+
+          {/* AI Fact Check Module */}
+          <div className="bg-zinc-950/40 border border-zinc-800/60 rounded-lg p-3 mb-4 print:hidden">
+            <h3 className="text-xs text-zinc-400 font-bold uppercase tracking-widest flex items-center gap-1.5 mb-2">
+              <span className="material-symbols-outlined text-[14px]">policy</span>
+              AI Fact Check
+            </h3>
+            
+            {!factCheck && !factCheckLoading && (
+              <button 
+                onClick={handleRunFactCheck}
+                className="w-full py-2 bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 rounded text-xs font-bold transition-colors"
+              >
+                Run Credibility Analysis
+              </button>
+            )}
+
+            {factCheckLoading && (
+              <div className="flex items-center justify-center py-4 gap-2 text-primary text-xs font-mono-data animate-pulse">
+                <RefreshCw className="w-4 h-4 animate-spin" /> Analyzing claims...
+              </div>
+            )}
+
+            {factCheck && (
+              <div className="flex flex-col gap-3 mt-2">
+                <div className="flex justify-between items-center bg-zinc-900 p-2 rounded border border-zinc-800 text-xs">
+                  <span className="text-zinc-400 font-mono-data">Credibility Score</span>
+                  <span className={`font-bold ${factCheck.credibility_score > 75 ? 'text-emerald-400' : factCheck.credibility_score > 50 ? 'text-amber-400' : 'text-rose-400'}`}>
+                    {factCheck.credibility_score}%
+                  </span>
+                </div>
+                
+                <p className="text-xs text-zinc-300 leading-relaxed border-l-2 border-primary/50 pl-2">
+                  {factCheck.summary}
+                </p>
+
+                {factCheck.claims && factCheck.claims.length > 0 && (
+                  <div className="flex flex-col gap-2 mt-2">
+                    <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-mono-data">Claim Review</span>
+                    {factCheck.claims.map((claim, idx) => (
+                      <div key={idx} className="bg-zinc-900/50 p-2 rounded text-xs border border-zinc-800/50">
+                        <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] uppercase font-bold mb-1 ${
+                          claim.status.toUpperCase() === 'CORROBORATED' ? 'bg-emerald-500/10 text-emerald-400' :
+                          claim.status.toUpperCase() === 'DISPUTED' ? 'bg-rose-500/10 text-rose-400' :
+                          'bg-amber-500/10 text-amber-400'
+                        }`}>
+                          {claim.status}
+                        </span>
+                        <p className="text-zinc-300 line-clamp-2" title={claim.text}>{claim.text}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Article List */}
           <div className="flex-1 overflow-y-auto pr-1 no-scrollbar space-y-3">
             {event.articles.length === 0 ? (
@@ -529,13 +945,24 @@ export default function EventDetailPage() {
                   >
                     {/* Source + trust badge row */}
                     <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono-data font-bold uppercase tracking-wide truncate max-w-[55%]">
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono-data font-bold uppercase tracking-wide truncate max-w-[50%]">
                         {art.source.name}
                       </span>
-                      <span className={`text-[9px] font-bold flex items-center gap-1 ${trustColor}`}>
-                        <CheckCircle className="w-2.5 h-2.5" />
-                        {percent}%
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-[8px] font-bold uppercase tracking-wider px-1 py-0.5 rounded border ${
+                            art.source.bias_lean === 'LEFT' ? 'text-blue-400 bg-blue-500/10 border-blue-500/30' :
+                            art.source.bias_lean === 'CENTER_LEFT' ? 'text-blue-200 bg-blue-300/10 border-blue-300/30' :
+                            art.source.bias_lean === 'CENTER_RIGHT' ? 'text-red-200 bg-red-300/10 border-red-300/30' :
+                            art.source.bias_lean === 'RIGHT' ? 'text-red-400 bg-red-500/10 border-red-500/30' :
+                            'text-zinc-400 bg-zinc-500/10 border-zinc-500/30'
+                        }`}>
+                            {art.source.bias_lean.replace('_', ' ')}
+                        </span>
+                        <span className={`text-[9px] font-bold flex items-center gap-1 ${trustColor}`}>
+                          <CheckCircle className="w-2.5 h-2.5" />
+                          {percent}%
+                        </span>
+                      </div>
                     </div>
                     {/* Title */}
                     <p className="text-[11px] font-semibold text-zinc-200 group-hover:text-white leading-snug line-clamp-3 mb-2 transition-colors">

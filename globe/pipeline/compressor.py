@@ -372,10 +372,13 @@ class Compressor:
                     if mappings[j].content_type in ("short_post", "osint"):
                         fact.short_post_confirmations.append(mappings[j].outlet)
 
-                elif sim >= 0.60 and mappings[j].outlet != mappings[i].outlet:
-                    # Moderate similarity from different outlet → potential contradiction
-                    # Check if the sentiment/framing differs significantly
-                    pass  # TODO: implement contradiction detection
+                # Moderate similarity from a different outlet is not
+                # actionable here. Contradictions are detected after
+                # deduplication by detect_contradictions(), which compares
+                # whole FactObjects with numeric and negation analysis rather
+                # than raw sentence pairs. Flagging inside this loop would
+                # duplicate that work and fire on paraphrases this stage
+                # cannot yet distinguish.
 
             fact.confirmation_count = len(set(fact.confirmed_by))
             if fact.confirmation_count == 1:

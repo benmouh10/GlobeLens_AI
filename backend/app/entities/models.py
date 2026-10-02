@@ -7,7 +7,7 @@ from typing import List, Optional
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean, DateTime, Enum, Float, ForeignKey,
-    String, Text, func
+    String, Text, UniqueConstraint, func
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -80,8 +80,13 @@ class User(Base):
     preferred_countries: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String), default=list)
     created_at: Mapped[datetime]      = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    comments: Mapped[List["Comment"]]           = relationship("Comment", back_populates="user")
-    fact_check_requests: Mapped[List["FactCheckRequest"]] = relationship("FactCheckRequest", back_populates="user")
+    # passive_deletes lets PostgreSQL's ON DELETE CASCADE remove the child
+    # rows. Without it SQLAlchemy loads each child and assigns NULL to the
+    # foreign key on delete, which trips the NOT NULL constraint and turns
+    # account deletion into a 500 whenever the user has ever bookmarked.
+    comments: Mapped[List["Comment"]]           = relationship("Comment", back_populates="user", passive_deletes=True)
+    fact_check_requests: Mapped[List["FactCheckRequest"]] = relationship("FactCheckRequest", back_populates="user", passive_deletes=True)
+    bookmarks: Mapped[List["Bookmark"]] = relationship("Bookmark", back_populates="user", passive_deletes=True)
 
 
 # ── Event ─────────────────────────────────────────────────────────────────────
@@ -103,8 +108,22 @@ class Event(Base):
     created_at: Mapped[datetime]     = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime]     = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    articles: Mapped[List["Article"]] = relationship("Article", back_populates="event")
-    comments: Mapped[List["Comment"]] = relationship("Comment", back_populates="event")
+    # Ordered to match ArticleRepository.find_by_event: summaries cite sources
+    # positionally as [1], [2]..., and the frontend resolves those against this
+    # list. An unordered relationship makes citation N resolve to an arbitrary
+    # article, so the two orderings have to be defined in the same place.
+    articles: Mapped[List["Article"]] = relationship(
+        "Article",
+        back_populates="event",
+        order_by="(Article.published_at.asc().nulls_last(), Article.id.asc())",
+        passive_deletes=True,
+    )
+    comments: Mapped[List["Comment"]] = relationship("Comment", back_populates="event", passive_deletes=True)
+    contradictions: Mapped[List["EventContradiction"]] = relationship(
+        "EventContradiction",
+        back_populates="event",
+        cascade="all, delete-orphan",
+    )
 
 
 # ── Article ───────────────────────────────────────────────────────────────────
@@ -175,3 +194,55 @@ class FactCheckRequest(Base):
     user_id: Mapped[uuid.UUID]     = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
 
     user: Mapped["User"] = relationship("User", back_populates="fact_check_requests")
+
+
+# ── Bookmark ──────────────────────────────────────────────────────────────────
+class Bookmark(Base):
+    """User saved events (Reading List)."""
+    __tablename__ = "bookmarks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    user: Mapped["User"] = relationship("User", back_populates="bookmarks")
+    event: Mapped["Event"] = relationship("Event")
+
+
+# ── EventContradiction ────────────────────────────────────────────────────────
+class EventContradiction(Base):
+    """
+    A recorded disagreement between two outlets covering the same event.
+
+    Persisted rather than recomputed per request: detection reads article
+    bodies and compares every claim pair, which is far too expensive to run
+    inside a GET. Rewritten only when an event's articles change.
+
+    This stores a *candidate* conflict for human review, not a verified
+    falsehood. ``nature`` records why the two claims looked incompatible, and
+    nothing here asserts which side is correct.
+    """
+    __tablename__ = "event_contradictions"
+
+    id: Mapped[uuid.UUID]      = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("events.id", ondelete="CASCADE"), index=True
+    )
+    nature: Mapped[str]        = mapped_column(String(50), nullable=False)
+    detail: Mapped[str]        = mapped_column(Text, nullable=False)
+    claim_a_text: Mapped[str]  = mapped_column(Text, nullable=False)
+    claim_a_source: Mapped[str] = mapped_column(String(255), nullable=False)
+    claim_b_text: Mapped[str]  = mapped_column(Text, nullable=False)
+    claim_b_source: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    event: Mapped["Event"] = relationship("Event", back_populates="contradictions")
+
+    # One identical disagreement is stored once; re-scanning an unchanged event
+    # must not accumulate duplicates.
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id", "nature", "claim_a_text", "claim_b_text", name="uq_event_contradiction_pair"
+        ),
+    )

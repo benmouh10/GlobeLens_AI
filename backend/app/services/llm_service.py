@@ -4,7 +4,6 @@ GlobeLens AI — LLMService
 Integrates Grok (x.AI) / OpenAI to generate syntheses, extract locations, topics, bias and importance.
 Pipeline Step 4: CLUSTERED → PROCESSED
 """
-import uuid
 import asyncio
 import json
 import structlog
@@ -170,7 +169,10 @@ class LLMService:
             "If a story concerns you, still return the required JSON object.\n"
             "Your task is to analyze a cluster of news articles about a single event and synthesize them. "
             "You must return a JSON object that strictly adheres to the following JSON Schema. "
-            "Ensure the summary is detailed and contains a minimum of 3 paragraphs.\n\n"
+            "Ensure the summary is detailed and contains a minimum of 3 paragraphs.\n"
+            "Do NOT include citation markers such as [1] in the summary. "
+            "Citations are attached afterwards by a separate attribution pass, "
+            "which will overwrite anything written here.\n\n"
             "Required JSON Schema:\n"
             "{\n"
             "  \"summary\": \"string (Objective synthesis, minimum 3 paragraphs)\",\n"
@@ -221,8 +223,11 @@ class LLMService:
             "\"location_country\": \"United States\", \"importance_score\": 6.0}\n"
         )
 
-        concatenated_articles = "\n\n=== ARTICLE ===\n".join(articles_content)
-        user_prompt = f"Analyze the following articles belonging to the same event cluster and generate the intelligence report:\n\n=== ARTICLE ===\n{concatenated_articles}"
+        concatenated_articles = ""
+        for idx, content in enumerate(articles_content, 1):
+            concatenated_articles += f"\n\n=== SOURCE [{idx}] ===\n{content}"
+            
+        user_prompt = f"Analyze the following articles belonging to the same event cluster and generate the intelligence report:\n{concatenated_articles}"
 
         # qwen2.5-coder sometimes refuses outright on stories involving
         # executions or stabbings, returning prose instead of JSON. It follows
@@ -458,6 +463,151 @@ class LLMService:
                 importance_score=7.0
             )
             return fallback_intel
+
+    async def attribute_sources(
+        self,
+        summary: str,
+        source_titles: List[str],
+    ) -> str | None:
+        """
+        Second pass: attach [N] citations to an existing summary.
+
+        The synthesis pass is left alone. Asking it for inline "[1][2]" markers
+        inside a free-text summary field produced zero citations across six
+        test events: a JSON schema constrains field names, not their contents,
+        so the instruction had no force. Requiring a `sources` array per
+        paragraph does have force, because omitting it fails validation instead
+        of passing silently.
+
+        Returns the summary with markers appended, or None if attribution could
+        not be completed, in which case the caller keeps the uncited summary
+        rather than storing a fabricated one.
+
+        Attribution is per paragraph, matching what the reader can verify. The
+        model is given titles rather than full bodies: deciding which outlet
+        reported a paragraph is a headline-level judgement, and full bodies
+        would roughly triple the prompt for no measurable gain.
+        """
+        paragraphs = [
+            p.strip() for p in summary.replace("\r\n", "\n").split("\n\n") if p.strip()
+        ]
+        if not paragraphs or not source_titles:
+            return None
+
+        # minItems is load-bearing, not decoration. Without it the model
+        # returned {"citations": []} on every event: under constrained
+        # decoding an empty array is the cheapest valid completion, so it
+        # satisfied the schema by citing nothing. Requiring at least one entry
+        # makes that undecodable.
+        source_list = {
+            "type": "array",
+            "items": {"type": "integer"},
+            "minItems": 1,
+        }
+        schema = {
+            "type": "object",
+            "properties": {
+                "citations": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "paragraph": {"type": "integer"},
+                            "sources": source_list,
+                        },
+                        "required": ["paragraph", "sources"],
+                    },
+                }
+            },
+            "required": ["citations"],
+        }
+
+        listing = "\n".join(
+            f"[{i}] {title}" for i, title in enumerate(source_titles, 1) if title
+        )
+        numbered = "\n\n".join(
+            f"PARAGRAPH {i}:\n{text}" for i, text in enumerate(paragraphs, 1)
+        )
+        prompt = (
+            "For each paragraph of the summary below, list which of the numbered "
+            "news sources it draws on.\n"
+            "Use only source numbers listed here, from 1 to "
+            f"{len(source_titles)}.\n\n"
+            f"SOURCES:\n{listing}\n\n{numbered}"
+        )
+
+        raw: str | None = None
+        for attempt in range(2):
+            try:
+                if settings.LLM_PROVIDER == "ollama":
+                    raw = await ollama_chat_json(
+                        "You attribute news summary paragraphs to their sources.",
+                        prompt,
+                        schema,
+                        temperature=0.1 if attempt == 0 else 0.4,
+                    )
+                else:
+                    response = await self._client.chat.completions.create(
+                        model=self._model,
+                        messages=[
+                            {"role": "system", "content": "You attribute news summary paragraphs to their sources."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.1,
+                    )
+                    raw = response.choices[0].message.content
+                break
+            except Exception as err:
+                logger.warn("Source attribution call failed", error=str(err))
+                if attempt == 1:
+                    return None
+
+        try:
+            citations = json.loads(raw or "{}").get("citations") or []
+        except Exception as err:
+            logger.warn("Source attribution response unparseable", error=str(err))
+            return None
+
+        limit = len(source_titles)
+        by_paragraph: dict[int, list[int]] = {}
+        for entry in citations:
+            try:
+                index = int(entry["paragraph"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not 1 <= index <= len(paragraphs):
+                continue
+
+            sources: list[int] = []
+            for value in entry.get("sources") or []:
+                try:
+                    number = int(value)
+                except (TypeError, ValueError):
+                    continue
+                # Drop anything outside the range rather than rendering a
+                # citation that resolves to no source.
+                if 1 <= number <= limit and number not in sources:
+                    sources.append(number)
+
+            if sources:
+                by_paragraph.setdefault(index, []).extend(
+                    n for n in sources if n not in by_paragraph.get(index, [])
+                )
+
+        if not by_paragraph:
+            logger.warn("Source attribution returned no usable citations")
+            return None
+
+        rendered = []
+        for i, text in enumerate(paragraphs, 1):
+            sources = by_paragraph.get(i)
+            if sources:
+                text = f"{text} {''.join(f'[{n}]' for n in sources)}"
+            rendered.append(text)
+
+        return "\n\n".join(rendered)
 
     async def resolve_primary_country(self, title: str, body_excerpt: str = "") -> str | None:
         """
@@ -697,12 +847,17 @@ class LLMService:
                         if not articles:
                             logger.warn("Event has no associated articles, skipping", event_id=str(event.id))
                             continue
-                        
-                        # Extract contents
-                        articles_content = []
-                        for art in articles:
-                            if art.content and art.content.strip():
-                                articles_content.append(f"Title: {art.title}\nContent: {art.content}")
+
+                        # One filtered list drives synthesis and attribution, so
+                        # citation numbers cannot drift from the articles the
+                        # model was shown.
+                        body_articles = [
+                            a for a in articles if a.content and a.content.strip()
+                        ]
+                        articles_content = [
+                            f"Title: {a.title}\nContent: {a.content}"
+                            for a in body_articles
+                        ]
 
                         if not articles_content:
                             logger.warn("Articles content empty for event, skipping", event_id=str(event.id))
@@ -710,10 +865,27 @@ class LLMService:
                         
                         # Call LLM Service to analyze cluster
                         intelligence = await self.analyze_event_cluster(articles_content)
+
+                        # Second pass attaches [N] citations. A summary field
+                        # asked for inline markers comes back without them, so
+                        # attribution is a separate structured call.
+                        summary = intelligence.summary
+                        try:
+                            attributed = await self.attribute_sources(
+                                summary, [a.title for a in body_articles]
+                            )
+                        except Exception as exc:
+                            logger.warn(
+                                "Attribution failed, keeping uncited summary",
+                                event_id=str(event.id), error=str(exc),
+                            )
+                            attributed = None
+                        if attributed:
+                            summary = attributed
                         
                         # Update event intelligence in repository
                         intel_data = {
-                            "summary": intelligence.summary,
+                            "summary": summary,
                             "topic": intelligence.topic.value,
                             "bias_lean": intelligence.bias_lean.value,
                             "location_country": intelligence.location_country,
@@ -724,6 +896,26 @@ class LLMService:
                         
                         await event_repo.update_event_intelligence(event.id, intel_data)
                         logger.info("Event intelligence successfully updated", event_id=str(event.id))
+
+                        # Cross-source contradiction scan. Kept out of the
+                        # intelligence update so a detector failure cannot cost
+                        # the summary: the event is still worth publishing
+                        # without a contradiction badge.
+                        try:
+                            from app.services.contradiction_service import (
+                                scan_event_contradictions,
+                            )
+                            found = await scan_event_contradictions(event.id, session)
+                            if found:
+                                logger.info(
+                                    "Cross-source contradictions found",
+                                    event_id=str(event.id), count=found,
+                                )
+                        except Exception as exc:
+                            logger.warn(
+                                "Contradiction scan failed, event kept without findings",
+                                event_id=str(event.id), error=str(exc),
+                            )
                         
                         # Trigger real-time search indexing
                         try:

@@ -94,7 +94,7 @@ async def cluster_all() -> tuple[int, int]:
     return assigned, created
 
 
-async def enrich(max_events: int, concurrency: int) -> tuple[int, int, int]:
+async def enrich(max_events: int, concurrency: int) -> tuple[int, ...]:
     """Enrich not-yet-geocoded events, biggest cross-outlet clusters first.
 
     LLMService.process_pending_events() walks events 20 at a time with a 5s
@@ -103,16 +103,18 @@ async def enrich(max_events: int, concurrency: int) -> tuple[int, int, int]:
     size (so the interesting multi-source events land first and are visible in
     the UI even if the run is cut short) and overlaps a few requests.
     """
-    import contextlib
-
     from app.repositories.article_repository import ArticleRepository
     from app.repositories.event_repository import EventRepository
-    from app.services.search_service import SearchService
+    from app.services.contradiction_service import scan_event_contradictions
 
     llm = LLMService()
     search = SearchService()
     sem = asyncio.Semaphore(concurrency)
-    tally = {"ok": 0, "fail": 0, "skip": 0}
+    tally = {
+    "ok": 0, "fail": 0, "skip": 0,
+    "cited": 0, "uncited": 0,
+    "contradictions": 0, "flagged": 0,
+}
 
     async with AsyncSessionFactory() as session:
         rows = (
@@ -134,10 +136,15 @@ async def enrich(max_events: int, concurrency: int) -> tuple[int, int, int]:
                 article_repo = ArticleRepository(session)
                 event_repo = EventRepository(session)
                 articles = await article_repo.find_by_event(event_id)
+                # One filtered list drives synthesis, attribution and the API's
+                # citation_index. If these diverge, a citation number points at
+                # a different article than the one the model saw.
+                body_articles = [
+                    a for a in articles if a.content and a.content.strip()
+                ]
                 contents = [
                     f"Title: {a.title}\nContent: {a.content}"
-                    for a in articles
-                    if a.content and a.content.strip()
+                    for a in body_articles
                 ]
                 if not contents:
                     tally["skip"] += 1
@@ -145,8 +152,8 @@ async def enrich(max_events: int, concurrency: int) -> tuple[int, int, int]:
 
                 # Topic and country evidence come from the article text, so
                 # both are derived from the same joined string.
-                event_title = articles[0].title
-                joined_text = "\n\n".join(a.content for a in articles if a.content)
+                event_title = body_articles[0].title
+                joined_text = "\n\n".join(a.content for a in body_articles)
                 try:
                     intel = await llm.analyze_event_cluster(contents)
                 except Exception as exc:
@@ -163,6 +170,27 @@ async def enrich(max_events: int, concurrency: int) -> tuple[int, int, int]:
                     "longitude": intel.longitude,
                     "importance_score": intel.importance_score,
                 }
+
+                # Second pass for [N] citations. The synthesis pass cannot
+                # produce them: asking a free-text summary field for inline
+                # markers yielded none across six test events, because a JSON
+                # schema constrains field names rather than their contents.
+                # Titles rather than bodies, since attribution is a
+                # headline-level judgement and bodies would triple the prompt.
+                try:
+                    attributed = await llm.attribute_sources(
+                        intel.summary, [a.title for a in body_articles]
+                    )
+                except Exception as exc:
+                    logger.warn(f"Attribution failed for {event_id}: {exc}")
+                    attributed = None
+
+                if attributed:
+                    intel_data["summary"] = attributed
+                    tally["cited"] += 1
+                else:
+                    # Keep the uncited summary rather than inventing markers.
+                    tally["uncited"] += 1
 
                 # The 7b model geocoded four unrelated events to downtown
                 # Washington DC and tagged a death-penalty story as
@@ -213,11 +241,27 @@ async def enrich(max_events: int, concurrency: int) -> tuple[int, int, int]:
 
                 await event_repo.update_event_intelligence(event_id, intel_data)
                 tally["ok"] += 1
+
+                # Cross-source contradiction scan. Runs after the intelligence
+                # write so a detection failure cannot lose the summary, and is
+                # reported separately: a failed scan is not a failed
+                # enrichment.
+                found = 0
+                try:
+                    found = await scan_event_contradictions(event_id, session)
+                except Exception as exc:
+                    logger.warn(f"contradiction scan failed for {event_id}: {exc}")
+
+                tally["contradictions"] += found
+                if found:
+                    tally["flagged"] += 1
+
                 logger.info(
                     f"enriched {str(event_id)[:8]} ({len(contents)} articles) "
                     f"topic={intel_data['topic']} "
                     f"country={intel_data['location_country']} "
-                    f"lat={intel_data['latitude']}"
+                    f"lat={intel_data['latitude']} "
+                    f"contradictions={found}"
                     + (f" CORRECTED[{'; '.join(corrections)}]" if corrections else "")
                 )
 
@@ -243,7 +287,11 @@ async def enrich(max_events: int, concurrency: int) -> tuple[int, int, int]:
         except Exception as sync_err:
             logger.error("search sync failed", error=str(sync_err))
 
-    return tally["ok"], tally["fail"], tally["skip"]
+    return (
+        tally["ok"], tally["fail"], tally["skip"],
+        tally["cited"], tally["uncited"],
+        tally["flagged"], tally["contradictions"],
+    )
 
 
 def main() -> None:
@@ -282,8 +330,14 @@ def main() -> None:
         return
 
     if args.enrich_only:
-        ok, fail, skip = asyncio.run(enrich(args.max, args.concurrency))
-        logger.info(f"Enriched {ok} events, {fail} failed, {skip} skipped")
+        ok, fail, skip, cited, uncited, flagged, contradictions = asyncio.run(
+            enrich(args.max, args.concurrency)
+        )
+        logger.info(
+            f"Enriched {ok} events, {fail} failed, {skip} skipped "
+            f"({cited} cited, {uncited} uncited, "
+            f"{contradictions} contradictions across {flagged} events)"
+        )
         return
 
     asyncio.run(_run(args))
@@ -300,8 +354,41 @@ async def _reembed_and_cluster(args) -> None:
     if args.skip_llm:
         return
 
-    ok, fail, skip = await enrich(args.max, args.concurrency)
-    logger.info(f"Enriched {ok} events, {fail} failed, {skip} skipped")
+    ok, fail, skip, cited, uncited, flagged, contradictions = await enrich(
+        args.max, args.concurrency
+    )
+    logger.info(
+        f"Enriched {ok} events, {fail} failed, {skip} skipped "
+        f"({cited} cited, {uncited} uncited, "
+        f"{contradictions} contradictions across {flagged} events)"
+    )
+
+
+async def _run(args) -> None:
+    """Default path: cluster whatever is unclustered, then enrich.
+
+    Non-destructive by design. This omits reset() and reembed_all() on purpose:
+    those delete events and recompute every embedding, which is what --reembed
+    is for. Running the bare command should improve the data, never drop it.
+
+    Previously this was a call to an undefined ``_run``, so invoking
+    ``python -m app.recluster`` with no flags raised NameError instead of
+    running anything.
+    """
+    assigned, created = await cluster_all()
+    logger.info(f"Clustered: {assigned} assigned, {created} new events")
+
+    if args.skip_llm:
+        return
+
+    ok, fail, skip, cited, uncited, flagged, contradictions = await enrich(
+        args.max, args.concurrency
+    )
+    logger.info(
+        f"Enriched {ok} events, {fail} failed, {skip} skipped "
+        f"({cited} cited, {uncited} uncited, "
+        f"{contradictions} contradictions across {flagged} events)"
+    )
 
 
 async def _report() -> None:

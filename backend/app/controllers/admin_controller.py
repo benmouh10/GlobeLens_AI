@@ -16,7 +16,31 @@ from app.services.clustering_service import ClusteringService
 from app.core.database import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 
-router = APIRouter()
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """
+    Reject anyone who is not an ADMIN.
+
+    This dependency must be attached to every route in this controller. The
+    module docstring has always claimed "ADMIN role required for all
+    endpoints", but nine routes had no dependency at all: unauthenticated
+    callers could change a role, toggle a block, delete an account, promote an
+    event or hide an article. Those handlers were also stubs that reported
+    success without touching the database, so the caller could not tell the
+    difference between a real moderation action and a no-op.
+    """
+    role = current_user.role.value if hasattr(current_user.role, "value") else current_user.role
+    if role != UserRole.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required",
+        )
+    return current_user
+
+
+# The guard lives on the router, so a moderation route added later is protected
+# by default rather than by remembering to attach a dependency. The handful of
+# routes below that also need the user object take it as a parameter as well.
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 class UpdateRoleRequest(BaseModel):
@@ -34,58 +58,304 @@ class PromoteEventRequest(BaseModel):
     event_id: str
 
 
+def _parse_uuid(raw: str, label: str):
+    """Path segments are strings; a malformed id must not become a 500."""
+    import uuid as _uuid
+
+    try:
+        return _uuid.UUID(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid {label} UUID")
+
+
 @router.get("/dashboard", summary="Admin dashboard overview (ADMIN)")
-async def get_dashboard():
-    # TODO: IAdminService.getDashboardStats()
-    return {"total_users": 0, "total_events": 0, "total_articles": 0}
+async def get_dashboard(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """
+    Live counts from the database.
+
+    Previously hardcoded zeros, so the admin dashboard reported an empty
+    system while 101 events were loaded.
+    """
+    from sqlalchemy import func, select
+    from app.entities.models import Article, Comment, Event, Source
+
+    async def count(model) -> int:
+        result = await db.execute(select(func.count()).select_from(model))
+        return int(result.scalar_one())
+
+    return {
+        "total_users": await count(User),
+        "total_events": await count(Event),
+        "total_articles": await count(Article),
+        "total_comments": await count(Comment),
+        "total_sources": await count(Source),
+        "hidden_articles": int(
+            (await db.execute(
+                select(func.count()).select_from(Article).where(Article.is_hidden.is_(True))
+            )).scalar_one()
+        ),
+        "blocked_users": int(
+            (await db.execute(
+                select(func.count()).select_from(User).where(User.is_blocked.is_(True))
+            )).scalar_one()
+        ),
+    }
 
 
 @router.get("/users", summary="List all users (ADMIN)")
-async def list_users():
-    # TODO: IUserRepository.findAll()
-    return {"users": []}
+async def list_users(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Real user list. Previously returned an empty list for everyone."""
+    from sqlalchemy import select
+    from app.entities.models import User as UserModel
+
+    result = await db.execute(select(UserModel).order_by(UserModel.created_at.desc()))
+    users = result.scalars().all()
+    return {
+        "users": [
+            {
+                "id": str(u.id),
+                "name": u.name,
+                "email": u.email,
+                "role": u.role.value if hasattr(u.role, "value") else u.role,
+                "is_blocked": u.is_blocked,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+            }
+            for u in users
+        ]
+    }
 
 
 @router.put("/users/{user_id}/role", summary="Change user role (ADMIN)")
-async def update_user_role(user_id: str = Path(...), payload: UpdateRoleRequest = ...):
-    # TODO: IUserService.updateRole(user_id, role)
-    return {"message": f"Role updated to {payload.role}", "user_id": user_id}
+async def update_user_role(
+    user_id: str = Path(...),
+    payload: UpdateRoleRequest = ...,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """
+    Persist the new role.
+
+    Previously echoed "Role updated to X" for any role string without writing
+    anything, so an operator could believe an escalation had been applied.
+"""
+    from app.entities.models import User as UserModel
+
+    target_uuid = _parse_uuid(user_id, "user")
+    try:
+        new_role = UserRole(payload.role.upper())
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown role '{payload.role}'. Valid roles: "
+                   f"{', '.join(r.value for r in UserRole)}",
+        )
+
+    user = await db.get(UserModel, target_uuid)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    previous = user.role.value if hasattr(user.role, "value") else user.role
+    user.role = new_role
+    await db.commit()
+    await db.refresh(user)
+
+    return {
+        "message": "Role updated",
+        "user_id": str(user.id),
+        "previous_role": previous,
+        "role": new_role.value,
+    }
 
 
 @router.put("/users/{user_id}/block", summary="Block / unblock a user (ADMIN)")
-async def toggle_block_user(user_id: str = Path(...)):
-    # TODO: IUserService.blockUser(user_id)
-    return {"message": "User block status toggled", "user_id": user_id}
+async def toggle_block_user(
+    user_id: str = Path(...),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """
+    Flip the block flag and report the resulting state.
+
+    Previously claimed a toggle happened while leaving is_blocked untouched.
+    Blocking an admin's own account is refused: an operator can lock themselves
+    and every other admin out with no way back in through the API.
+    """
+    from app.entities.models import User as UserModel
+
+    target_uuid = _parse_uuid(user_id, "user")
+    if target_uuid == admin.id:
+        raise HTTPException(
+            status_code=400,
+            detail="An admin cannot block their own account",
+        )
+
+    user = await db.get(UserModel, target_uuid)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.is_blocked = not user.is_blocked
+    await db.commit()
+    await db.refresh(user)
+
+    return {
+        "message": "User block status updated",
+        "user_id": str(user.id),
+        "is_blocked": user.is_blocked,
+    }
 
 
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete user (ADMIN)")
-async def admin_delete_user(user_id: str = Path(...)):
-    # TODO: IUserService.deleteUser(user_id)
+async def admin_delete_user(
+    user_id: str = Path(...),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Actually delete. Previously returned 204 without removing anything."""
+    from app.entities.models import User as UserModel
+
+    target_uuid = _parse_uuid(user_id, "user")
+    if target_uuid == admin.id:
+        raise HTTPException(
+            status_code=400,
+            detail="An admin cannot delete their own account",
+        )
+
+    user = await db.get(UserModel, target_uuid)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    await db.delete(user)
+    await db.commit()
     return None
 
 
 @router.delete("/comments/{comment_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Moderate / delete comment (ADMIN)")
-async def admin_delete_comment(comment_id: str = Path(...)):
-    # TODO: ICommentService.deleteComment(comment_id, force=True)
+async def admin_delete_comment(
+    comment_id: str = Path(...),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Actually remove the comment, or say clearly that it does not exist."""
+    from app.entities.models import Comment
+
+    comment_uuid = _parse_uuid(comment_id, "comment")
+    comment = await db.get(Comment, comment_uuid)
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    await db.delete(comment)
+    await db.commit()
     return None
 
 
 @router.post("/events/promote", status_code=status.HTTP_200_OK, summary="Promote an event to featured (ADMIN)")
-async def promote_event(payload: PromoteEventRequest):
-    # TODO: IEventService.promoteEvent(event_id)
-    return {"message": "Event promoted", "event_id": payload.event_id}
+async def promote_event(
+    payload: PromoteEventRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Persist is_promoted. Previously claimed success without any write."""
+    from app.entities.models import Event
+
+    event_uuid = _parse_uuid(payload.event_id, "event")
+    event = await db.get(Event, event_uuid)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    event.is_promoted = True
+    await db.commit()
+    await db.refresh(event)
+
+    return {
+        "message": "Event promoted",
+        "event_id": str(event.id),
+        "is_promoted": event.is_promoted,
+    }
 
 
 @router.put("/articles/{article_id}/hide", summary="Hide / mask article from public (ADMIN)")
-async def hide_article(article_id: str = Path(...)):
-    # TODO: IArticleService.hideArticle(article_id)
-    return {"message": "Article hidden", "article_id": article_id}
+async def hide_article(
+    article_id: str = Path(...),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """
+    Persist is_hidden.
+
+    Previously answered "Article hidden" while leaving the article public, which
+    is the most damaging direction for this failure: an editor moderating a
+    retracted or defamatory story would be told it was hidden and it would
+    still be served.
+    """
+    from app.entities.models import Article
+
+    article_uuid = _parse_uuid(article_id, "article")
+    article = await db.get(Article, article_uuid)
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+
+    article.is_hidden = not article.is_hidden
+    await db.commit()
+    await db.refresh(article)
+
+    return {
+        "message": "Article visibility updated",
+        "article_id": str(article.id),
+        "is_hidden": article.is_hidden,
+    }
 
 
 @router.post("/sources", status_code=status.HTTP_201_CREATED, summary="Add a new media source (ADMIN)")
-async def create_source(payload: CreateSourceRequest):
-    # TODO: ISourceRepository.save(payload)
-    return {"message": "Source added", "name": payload.name}
+async def create_source(
+    payload: CreateSourceRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """
+    Insert the source row.
+
+    Previously returned 201 "Source added" and stored nothing, so the source
+    list silently stopped matching what the API claimed to have registered.
+    """
+    from sqlalchemy import select
+    from app.entities.models import Source
+
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Source name cannot be empty")
+    if not payload.url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Source url must be http(s)")
+    if payload.credibility_score is not None and not 0.0 <= payload.credibility_score <= 1.0:
+        raise HTTPException(
+            status_code=400, detail="credibility_score must be between 0 and 1"
+        )
+
+    existing = await db.execute(select(Source).where(Source.name == name))
+    if existing.scalars().first():
+        raise HTTPException(status_code=409, detail=f"Source '{name}' already exists")
+
+    source = Source(
+        name=name,
+        url=payload.url,
+        country=payload.country,
+        credibility_score=payload.credibility_score,
+    )
+    db.add(source)
+    await db.commit()
+    await db.refresh(source)
+
+    return {
+        "message": "Source added",
+        "id": str(source.id),
+        "name": source.name,
+        "url": source.url,
+    }
 
 
 @router.get("/stats", summary="System-wide analytics (ADMIN)")

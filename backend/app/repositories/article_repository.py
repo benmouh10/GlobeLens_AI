@@ -40,9 +40,22 @@ class ArticleRepository:
         return list(result.scalars().all())
 
     async def find_by_event(self, event_id: uuid.UUID) -> List[Article]:
-        """Return all articles belonging to a given Event."""
+        """Return all articles belonging to a given Event, in citation order.
+
+        The order is not cosmetic. Event summaries cite sources as [1], [2]...
+        where the number is the position of the article in this list, and the
+        frontend resolves [2] as the second article the API returns. Both sides
+        must agree on a total order or a citation points at the wrong article.
+        published_at is the sort a reader expects; id breaks the tie because
+        scraped articles can share a timestamp.
+        """
         result = await self._session.execute(
-            select(Article).where(Article.event_id == event_id)
+            select(Article)
+            .where(Article.event_id == event_id)
+            .order_by(
+                Article.published_at.asc().nulls_last(),
+                Article.id.asc(),
+            )
         )
         return list(result.scalars().all())
 
