@@ -17,7 +17,7 @@ import {
   UserCheck
 } from "lucide-react";
 
-import GlobelensLogo from "../components/GlobelensLogo";
+import PrimaryNav from "../components/PrimaryNav";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -169,24 +169,8 @@ export default function FactCheckerPage() {
       <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(99,102,241,0.02)_1px,transparent_1px),linear-gradient(to_bottom,rgba(99,102,241,0.02)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none z-0"></div>
 
       {/* TopNavBar */}
-      <nav className="flex justify-between items-center px-margin-desktop w-full h-16 sticky top-0 z-50 bg-[#080c16]/80 backdrop-blur-lg border-b border-indigo-950/40 flex-shrink-0">
-        <div className="flex items-center gap-stack-lg">
-          <div className="flex items-center gap-2 cursor-pointer" onClick={() => router.push("/")}>
-            <GlobelensLogo size="36px" hideWordmark />
-            <span className="font-extrabold text-headline-lg bg-gradient-to-r from-cyber-cyan via-indigo-300 to-cyber-indigo bg-clip-text text-transparent drop-shadow-[0_0_15px_rgba(6,182,212,0.25)] tracking-tight">
-              GlobeLens AI
-            </span>
-          </div>
-
-
-          <div className="hidden md:flex gap-stack-lg items-center ml-8 pt-1">
-            <a className="font-body-md text-body-md text-on-surface-variant font-medium hover:text-cyber-cyan transition-colors" href="/?view=standard">Standard</a>
-            <a className="font-body-md text-body-md text-on-surface-variant font-medium hover:text-cyber-cyan transition-colors" href="/?view=map">Map</a>
-            <a className="font-body-md text-body-md text-on-surface-variant font-medium hover:text-cyber-cyan transition-colors" href="/admin/dashboard">Admin</a>
-            <a className="font-body-md text-body-md text-cyber-cyan font-bold border-b-2 border-cyber-cyan pb-1" href="/fact-checker">Fact Checker</a>
-            <a className="font-body-md text-body-md text-on-surface-variant font-medium hover:text-cyber-cyan transition-colors" href="/offline">Offline</a>
-          </div>
-        </div>
+      <header className="flex justify-between items-center px-margin-desktop w-full h-16 sticky top-0 z-50 bg-[#080c16]/80 backdrop-blur-lg border-b border-indigo-950/40 flex-shrink-0">
+        <PrimaryNav activeHref="/fact-checker" role={userProfile?.role} />
         <div className="flex items-center gap-4">
           <Link
             href="/profile"
@@ -196,7 +180,7 @@ export default function FactCheckerPage() {
             {userProfile.name.slice(0, 2).toUpperCase()}
           </Link>
         </div>
-      </nav>
+      </header>
 
       {/* Main Content Layout */}
       <div className="flex-1 flex w-full max-w-container-max-width mx-auto relative px-margin-mobile md:px-margin-desktop py-stack-lg z-10 gap-6">

@@ -292,11 +292,17 @@ services:
       # Mount src for hot-reload; node_modules is kept in container
       - ./frontend/src:/app/src:delegated
       - ./frontend/public:/app/public:delegated
+      # next.config.js drives the /api rewrite; mount it so proxy changes
+      # (e.g. INTERNAL_API_URL) apply without an image rebuild.
+      - ./frontend/next.config.js:/app/next.config.js:delegated
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     environment:
       NODE_ENV: development
+      # Browser-facing base URL (reached by the user's browser)
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      # Server-side rewrite target (reached over the Docker network)
+      INTERNAL_API_URL: ${INTERNAL_API_URL:-http://backend:8000}
       NEXT_PUBLIC_APP_NAME: GlobeLens AI
       WATCHPACK_POLLING: "true"    # Required for hot-reload inside Docker on Windows
     networks:

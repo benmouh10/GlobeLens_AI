@@ -12,7 +12,7 @@
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Trash2, RefreshCw, HardDriveDownload, Clock } from "lucide-react";
-import PillNav from "../components/PillNav";
+import PrimaryNav from "../components/PrimaryNav";
 import EventSnapshot from "../../components/EventSnapshot";
 import { listSavedEvents, removeEventForOffline, SavedEvent } from "../../lib/offline";
 
@@ -65,40 +65,7 @@ export default function OfflinePage() {
   return (
     <div className="bg-background text-on-background min-h-screen flex flex-col font-body-md">
       <header className="flex justify-between items-center px-margin-desktop w-full h-16 sticky top-0 z-50 bg-[#080c16]/80 backdrop-blur-lg border-b border-indigo-950/40 flex-shrink-0">
-        <PillNav
-          logo="/logo.svg"
-          logoAlt="GlobeLens AI Logo"
-          items={[
-            {
-              label: "Standard",
-              href: "/?view=standard",
-              onClick: (e) => {
-                e.preventDefault();
-                router.push("/?view=standard");
-              },
-            },
-            {
-              label: "Map",
-              href: "/?view=map",
-              onClick: (e) => {
-                e.preventDefault();
-                router.push("/?view=map");
-              },
-            },
-            { label: "Profile", href: "/profile" },
-            { label: "Dispatches", href: "/dispatches" },
-            { label: "Reading Lists", href: "/reading-lists" },
-            { label: "Newsletter", href: "/newsletter" },
-            { label: "Fact Checker", href: "/fact-checker" },
-            { label: "Offline", href: "/offline" },
-          ]}
-          activeHref="/offline"
-          baseColor="#080c16"
-          pillColor="#0c101b"
-          hoveredPillTextColor="#22d3ee"
-          pillTextColor="#94a3b8"
-          initialLoadAnimation={false}
-        />
+        <PrimaryNav activeHref="/offline" />
       </header>
 
       <div className="flex-1 max-w-[1440px] mx-auto w-full grid grid-cols-1 lg:grid-cols-12 gap-gutter px-margin-mobile lg:px-margin-desktop py-stack-lg">

@@ -16,7 +16,7 @@ import {
   ShieldAlert,
   Trash2,
 } from "lucide-react";
-import PillNav from "../components/PillNav";
+import PrimaryNav from "../components/PrimaryNav";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const API = `${API_BASE_URL}/api/v1`;
@@ -251,43 +251,9 @@ export default function NewsroomPage() {
 
   return (
     <div className="bg-background text-on-background min-h-screen flex flex-col font-body-md relative overflow-x-hidden">
-      {/* TopNavBar — PillNav (same header as the rest of the app) */}
+      {/* TopNavBar — shared PrimaryNav */}
       <header className="flex justify-between items-center px-margin-desktop w-full h-16 sticky top-0 z-50 bg-[#080c16]/80 backdrop-blur-lg border-b border-indigo-950/40 flex-shrink-0">
-        <PillNav
-          logo="/logo.svg"
-          logoAlt="GlobeLens AI Logo"
-          items={[
-            {
-              label: "Standard",
-              href: "/?view=standard",
-              onClick: (e) => {
-                e.preventDefault();
-                router.push("/?view=standard");
-              },
-            },
-            {
-              label: "Map",
-              href: "/?view=map",
-              onClick: (e) => {
-                e.preventDefault();
-                router.push("/?view=map");
-              },
-            },
-            { label: "Dispatches", href: "/dispatches" },
-            { label: "Reading Lists", href: "/reading-lists" },
-            { label: "Newsletter", href: "/newsletter" },
-            { label: "Profile", href: "/profile" },
-            ...(me?.role === "ADMIN" ? [{ label: "Admin", href: "/admin/dashboard" }] : []),
-            { label: "Fact Checker", href: "/fact-checker" },
-            { label: "Offline", href: "/offline" },
-          ]}
-          activeHref="/newsroom"
-          baseColor="#080c16"
-          pillColor="#0c101b"
-          hoveredPillTextColor="#22d3ee"
-          pillTextColor="#94a3b8"
-          initialLoadAnimation={false}
-        />
+        <PrimaryNav activeHref="/newsroom" role={me?.role} />
       </header>
 
       <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(69,70,77,0.06)_1px,transparent_1px),linear-gradient(to_bottom,rgba(69,70,77,0.06)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none z-0"></div>

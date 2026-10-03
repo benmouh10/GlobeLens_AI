@@ -11,10 +11,17 @@ const nextConfig = {
 
   // API proxy — route /api/* to the FastAPI backend
   async rewrites() {
+    // Server-side proxy target. Inside Docker the browser-facing
+    // NEXT_PUBLIC_API_URL (localhost) is NOT reachable from the Next server
+    // process, so prefer INTERNAL_API_URL (e.g. http://backend:8000).
+    const internalApi =
+      process.env.INTERNAL_API_URL ||
+      process.env.NEXT_PUBLIC_API_URL ||
+      "http://localhost:8000";
     return [
       {
         source: "/api/:path*",
-        destination: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/:path*`,
+        destination: `${internalApi}/api/:path*`,
       },
     ];
   },
