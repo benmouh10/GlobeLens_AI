@@ -154,6 +154,10 @@ services:
   # FastAPI Backend — Core application layer
   # ─────────────────────────────────────────────────────────────────────────
   backend:
+    # Published by CI/CD on green pushes to main. On a deploy host, pin the
+    # exact build with IMAGE_TAG=sha-<commit> and run `docker compose pull`.
+    # Local development keeps using `build` via `docker compose up --build`.
+    image: ghcr.io/benmouh10/globelens_ai-backend:${IMAGE_TAG:-latest}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -266,6 +270,7 @@ services:
   # Next.js Frontend Placeholder — Web Client (port 3000)
   # ─────────────────────────────────────────────────────────────────────────
   frontend:
+    image: ghcr.io/benmouh10/globelens_ai-frontend:${IMAGE_TAG:-latest}
     build:
       context: ./frontend
       dockerfile: Dockerfile
