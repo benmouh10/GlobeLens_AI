@@ -27,12 +27,48 @@ class TestProductionSecretValidation:
 
     def test_accepts_strong_secret_key(self):
         key = "k" * 48
-        cfg = Settings(_env_file=None, APP_ENV="production", SECRET_KEY=key)
+        cfg = Settings(
+            _env_file=None,
+            APP_ENV="production",
+            SECRET_KEY=key,
+            SMTP_HOST="smtp.gmail.com",
+        )
         assert cfg.SECRET_KEY == key
 
     def test_development_tolerates_default_secret_key(self):
         cfg = Settings(_env_file=None, APP_ENV="development")
         assert cfg.SECRET_KEY == "CHANGE_ME_IN_PRODUCTION"
+
+
+class TestProductionSmtpValidation:
+    """A production boot must not silently use the development Mailpit sink."""
+
+    _KEY = "k" * 48
+
+    @pytest.mark.parametrize("sink", ["", "mailpit", "localhost", "127.0.0.1"])
+    def test_rejects_sink_host_in_production(self, sink):
+        with pytest.raises(ValidationError):
+            Settings(
+                _env_file=None,
+                APP_ENV="production",
+                SECRET_KEY=self._KEY,
+                SMTP_HOST=sink,
+            )
+
+    def test_accepts_real_host_in_production(self):
+        cfg = Settings(
+            _env_file=None,
+            APP_ENV="production",
+            SECRET_KEY=self._KEY,
+            SMTP_HOST="smtp.gmail.com",
+            SMTP_PORT=587,
+            SMTP_STARTTLS=True,
+        )
+        assert cfg.SMTP_HOST == "smtp.gmail.com"
+
+    def test_development_allows_mailpit(self):
+        cfg = Settings(_env_file=None, APP_ENV="development", SMTP_HOST="mailpit")
+        assert cfg.SMTP_HOST == "mailpit"
 
 
 class TestRedaction:

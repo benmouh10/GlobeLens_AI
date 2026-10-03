@@ -10,6 +10,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.redaction import redact_mapping
 
+# SMTP hosts that are development test sinks, never real delivery. Used to
+# refuse a production boot that would silently swallow outbound mail.
+_SMTP_SINK_HOSTS = {"", "mailpit", "localhost", "127.0.0.1", "::1"}
+
+# APP_ENV values that mean "this is a real deployment".
+_PRODUCTION_ENVS = {"production", "prod"}
+
 
 class Settings(BaseSettings):
     """Central configuration store for all environment-driven settings."""
@@ -158,13 +165,33 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _enforce_production_secrets(self) -> "Settings":
         """Refuse to start in production with a weak or default SECRET_KEY."""
-        if self.APP_ENV.strip().lower() in {"production", "prod"}:
+        if self.APP_ENV.strip().lower() in _PRODUCTION_ENVS:
             key = (self.SECRET_KEY or "").strip()
             if key in {"", "CHANGE_ME_IN_PRODUCTION"} or len(key) < 32:
                 raise ValueError(
                     "SECRET_KEY must be a random value of at least 32 characters "
                     "when APP_ENV=production. Generate one with: "
                     'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_production_smtp(self) -> "Settings":
+        """Refuse to start in production while email still points at a test sink.
+
+        Without this, a production deploy that forgot the SMTP_* variables looks
+        healthy but every newsletter confirmation and digest is silently dropped
+        into nowhere (or, worse, a same-host Mailpit that no one reads).
+        """
+        if self.APP_ENV.strip().lower() in _PRODUCTION_ENVS:
+            host = (self.SMTP_HOST or "").strip().lower()
+            if host in _SMTP_SINK_HOSTS:
+                raise ValueError(
+                    "SMTP_HOST still points at the development Mailpit sink "
+                    f"({self.SMTP_HOST!r}) but APP_ENV=production requires real "
+                    "email delivery. For Gmail set SMTP_HOST=smtp.gmail.com, "
+                    "SMTP_PORT=587, SMTP_STARTTLS=true, SMTP_USERNAME=<address>, "
+                    "SMTP_PASSWORD=<App Password>, SMTP_FROM_EMAIL=<address>."
                 )
         return self
 
