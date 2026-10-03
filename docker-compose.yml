@@ -225,6 +225,7 @@ services:
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
       RATE_LIMIT_DEFAULT: ${RATE_LIMIT_DEFAULT:-120/minute}
       RATE_LIMIT_AUTH: ${RATE_LIMIT_AUTH:-10/minute}
+      RATE_LIMIT_GUEST: ${RATE_LIMIT_GUEST:-30/minute}
       # Only enable behind a trusted proxy that sets X-Forwarded-For.
       RATE_LIMIT_TRUST_FORWARDED: ${RATE_LIMIT_TRUST_FORWARDED:-false}
 

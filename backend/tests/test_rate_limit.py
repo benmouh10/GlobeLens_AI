@@ -104,11 +104,12 @@ async def test_blocks_after_limit(fake_cache, monkeypatch):
     monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
     monkeypatch.setattr(settings, "RATE_LIMIT_DEFAULT", "2/minute")
     app = _make_app()
+    auth = {"Authorization": "Bearer token"}
 
     async with _client(app) as client:
-        assert (await client.get("/ping")).status_code == 200
-        assert (await client.get("/ping")).status_code == 200
-        blocked = await client.get("/ping")
+        assert (await client.get("/ping", headers=auth)).status_code == 200
+        assert (await client.get("/ping", headers=auth)).status_code == 200
+        blocked = await client.get("/ping", headers=auth)
         assert blocked.status_code == 429
         assert "Retry-After" in blocked.headers
         assert blocked.headers["X-RateLimit-Remaining"] == "0"
@@ -142,6 +143,23 @@ async def test_auth_tier_is_stricter_than_default(fake_cache, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_guest_tier_is_stricter_than_authenticated(fake_cache, monkeypatch):
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "RATE_LIMIT_DEFAULT", "100/minute")
+    monkeypatch.setattr(settings, "RATE_LIMIT_GUEST", "1/minute")
+    app = _make_app()
+
+    async with _client(app) as client:
+        # Anonymous callers share the tight guest bucket...
+        assert (await client.get("/ping")).status_code == 200
+        assert (await client.get("/ping")).status_code == 429
+        # ...while a bearer token moves the caller onto the generous default.
+        auth = {"Authorization": "Bearer a-real-token"}
+        assert (await client.get("/ping", headers=auth)).status_code == 200
+        assert (await client.get("/ping", headers=auth)).status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_fails_open_when_cache_unavailable(monkeypatch):
     async def _boom():
         raise RuntimeError("redis down")
@@ -149,6 +167,7 @@ async def test_fails_open_when_cache_unavailable(monkeypatch):
     monkeypatch.setattr(cache_service, "_get_client", _boom)
     monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
     monkeypatch.setattr(settings, "RATE_LIMIT_DEFAULT", "1/minute")
+    monkeypatch.setattr(settings, "RATE_LIMIT_GUEST", "1/minute")
     app = _make_app()
 
     async with _client(app) as client:
@@ -180,9 +199,12 @@ async def test_throttled_response_keeps_cors_headers(fake_cache, monkeypatch):
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    auth = {"Authorization": "Bearer token"}
 
     async with _client(app) as client:
-        assert (await client.get("/ping")).status_code == 200
-        blocked = await client.get("/ping", headers={"Origin": "http://client.test"})
+        assert (await client.get("/ping", headers=auth)).status_code == 200
+        blocked = await client.get(
+            "/ping", headers={**auth, "Origin": "http://client.test"}
+        )
         assert blocked.status_code == 429
         assert blocked.headers.get("access-control-allow-origin") == "http://client.test"

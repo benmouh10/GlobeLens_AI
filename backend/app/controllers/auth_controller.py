@@ -229,6 +229,14 @@ async def refresh_token(
     client that trusted it would store a value that is not a JWT and be
     silently signed out on the next request, with no error to explain why.
     """
+    # Same guard as /logout: auto_error=False lets a missing header through as
+    # None, and dereferencing it would be a 500 rather than the expected 401.
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     token = credentials.credentials
     payload = _decode_token(token)
 

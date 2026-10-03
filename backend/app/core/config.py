@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_DEFAULT: str = "120/minute"
     RATE_LIMIT_AUTH: str = "10/minute"
+    # Anonymous visitors (no bearer token) are the cheapest to abuse, so they
+    # get a tighter budget than authenticated accounts.
+    RATE_LIMIT_GUEST: str = "30/minute"
     RATE_LIMIT_TRUST_FORWARDED: bool = False
 
     # ── Security response headers (see app/middleware/security_headers.py) ────

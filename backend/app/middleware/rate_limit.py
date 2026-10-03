@@ -2,9 +2,10 @@
 GlobeLens AI — Redis-backed rate limiting middleware.
 
 Limits are enforced with a shared Redis counter so they hold across all
-gunicorn workers and containers, unlike an in-process limiter. Two tiers are
+gunicorn workers and containers, unlike an in-process limiter. Three tiers are
 used: a strict one for the authentication surface (login/register/refresh,
-which is the brute-force target) and a general one for everything else.
+which is the brute-force target), a general one for authenticated callers, and
+a tighter one for anonymous guests, who are the cheapest to abuse.
 
 The limiter is deliberately fail-open: if Redis is unreachable the request is
 allowed through, so a cache outage degrades rate limiting rather than taking
@@ -73,8 +74,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if path in _EXEMPT_PATHS:
             return await call_next(request)
 
-        category = "auth" if path in _AUTH_PATHS else "default"
-        spec = settings.RATE_LIMIT_AUTH if category == "auth" else settings.RATE_LIMIT_DEFAULT
+        if path in _AUTH_PATHS:
+            category, spec = "auth", settings.RATE_LIMIT_AUTH
+        elif self._has_bearer(request):
+            # A bearer token means the caller has an account; anonymous guests
+            # get the tighter budget.
+            category, spec = "default", settings.RATE_LIMIT_DEFAULT
+        else:
+            category, spec = "guest", settings.RATE_LIMIT_GUEST
         limit, window = parse_rate(spec)
         identifier = self._client_identifier(request)
 
@@ -109,6 +116,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return forwarded.split(",")[0].strip() or "unknown"
         client = request.client
         return client.host if client and client.host else "unknown"
+
+    @staticmethod
+    def _has_bearer(request: Request) -> bool:
+        header = request.headers.get("authorization", "")
+        return header[:7].lower() == "bearer "
 
     @staticmethod
     async def _consume(

@@ -8,6 +8,8 @@ from fastapi import APIRouter, Path, Query, Depends, HTTPException, status
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
+from app.core.rbac import require_role
+from app.entities.models import UserRole
 
 router = APIRouter()
 
@@ -384,7 +386,8 @@ async def get_related_events(
 @router.get("/{event_id}/fact-check", summary="Run fact-check analysis on an event")
 async def check_event_facts(
     event_id: str = Path(..., description="Event UUID"),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_role(UserRole.AUTH_USER)),
 ):
     from app.entities.models import Event
     from app.services.llm_service import LLMService

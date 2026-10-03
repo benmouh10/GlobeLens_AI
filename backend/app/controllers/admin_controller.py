@@ -11,31 +11,18 @@ from typing import Optional
 
 from app.controllers.auth_controller import get_current_user
 from app.core.passwords import validate_password_strength
+from app.core.rbac import require_role
 from app.entities.models import User, UserRole
 from app.services.embedding_service import EmbeddingService
 from app.services.clustering_service import ClusteringService
 from app.core.database import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 
-def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    """
-    Reject anyone who is not an ADMIN.
-
-    This dependency must be attached to every route in this controller. The
-    module docstring has always claimed "ADMIN role required for all
-    endpoints", but nine routes had no dependency at all: unauthenticated
-    callers could change a role, toggle a block, delete an account, promote an
-    event or hide an article. Those handlers were also stubs that reported
-    success without touching the database, so the caller could not tell the
-    difference between a real moderation action and a no-op.
-    """
-    role = current_user.role.value if hasattr(current_user.role, "value") else current_user.role
-    if role != UserRole.ADMIN.value:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required",
-        )
-    return current_user
+# Admin-only tier. The hierarchy lives in app.core.rbac so every controller
+# speaks the same role vocabulary; the name is kept for existing importers
+# (e.g. newsletter_controller). require_role(ADMIN) answers anonymous callers
+# with 401 and lower-ranked accounts with 403.
+require_admin = require_role(UserRole.ADMIN)
 
 
 # The guard lives on the router, so a moderation route added later is protected
