@@ -3,7 +3,7 @@
 # =============================================================================
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
@@ -182,3 +182,11 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 @app.get("/", tags=["Root"])
 async def root():
     return {"message": "Welcome to GlobeLens AI API. Visit /docs for Swagger UI."}
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    # Browsers probe /favicon.ico on every origin, including the API's Swagger
+    # UI. Answer 204 (no content) instead of 404 so the console and access logs
+    # stay clean; the real icon is served by the frontend.
+    return Response(status_code=204)
