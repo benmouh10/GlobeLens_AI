@@ -5,8 +5,10 @@ Reads all settings from environment variables (or .env file via pydantic-setting
 from functools import lru_cache
 from typing import Any, List, Optional
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.redaction import redact_mapping
 
 
 class Settings(BaseSettings):
@@ -24,6 +26,16 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "CHANGE_ME_IN_PRODUCTION"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    # ── Rate limiting (Redis-backed; see app/middleware/rate_limit.py) ────────
+    # Specs use the form "<count>/<period>" with period second|minute|hour|day.
+    # AUTH guards the credential endpoints (brute-force surface); DEFAULT covers
+    # every other route. TRUST_FORWARDED must stay False unless the app sits
+    # behind a proxy that sets X-Forwarded-For, otherwise the header is spoofable.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_DEFAULT: str = "120/minute"
+    RATE_LIMIT_AUTH: str = "10/minute"
+    RATE_LIMIT_TRUST_FORWARDED: bool = False
 
     # ── PostgreSQL / pgvector ─────────────────────────────────────────────────
     # Async URL (asyncpg driver) — used by FastAPI runtime and SQLAlchemy engine
@@ -138,6 +150,28 @@ class Settings(BaseSettings):
                 return json.loads(v)
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
+
+    @model_validator(mode="after")
+    def _enforce_production_secrets(self) -> "Settings":
+        """Refuse to start in production with a weak or default SECRET_KEY."""
+        if self.APP_ENV.strip().lower() in {"production", "prod"}:
+            key = (self.SECRET_KEY or "").strip()
+            if key in {"", "CHANGE_ME_IN_PRODUCTION"} or len(key) < 32:
+                raise ValueError(
+                    "SECRET_KEY must be a random value of at least 32 characters "
+                    "when APP_ENV=production. Generate one with: "
+                    'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+                )
+        return self
+
+    def redacted(self) -> dict:
+        """Settings as a mapping with secrets and URL credentials masked."""
+        return redact_mapping(self.model_dump())
+
+    def __repr__(self) -> str:
+        return f"Settings({self.redacted()!r})"
+
+    __str__ = __repr__
 
     @property
     def celery_broker(self) -> str:

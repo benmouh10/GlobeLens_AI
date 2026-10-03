@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import engine, get_db
 from app.core.logging import configure_logging
+from app.middleware.rate_limit import RateLimitMiddleware
 
 # ── Controller (Router) imports ───────────────────────────────────────────────
 from app.controllers.auth_controller import router as auth_router
@@ -93,6 +94,9 @@ app = FastAPI(
 )
 
 # ── Middleware ────────────────────────────────────────────────────────────────
+# Order matters: added last is outermost. Rate limiting is added first so CORS
+# wraps it and 429 responses still carry CORS headers for browser clients.
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,

@@ -2,6 +2,8 @@
 import logging
 import structlog
 
+from app.core.redaction import redact_processor
+
 
 def configure_logging() -> None:
     """Configure structlog for JSON-formatted structured logging."""
@@ -11,6 +13,8 @@ def configure_logging() -> None:
             structlog.stdlib.add_log_level,
             structlog.stdlib.add_logger_name,
             structlog.processors.TimeStamper(fmt="iso"),
+            # Mask secrets before anything is rendered or emitted.
+            redact_processor,
             structlog.dev.ConsoleRenderer(),
         ],
         wrapper_class=structlog.stdlib.BoundLogger,

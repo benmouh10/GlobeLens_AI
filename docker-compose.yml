@@ -221,6 +221,13 @@ services:
       # ── CORS ──
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
 
+      # ── Rate limiting (Redis-backed) ──
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_DEFAULT: ${RATE_LIMIT_DEFAULT:-120/minute}
+      RATE_LIMIT_AUTH: ${RATE_LIMIT_AUTH:-10/minute}
+      # Only enable behind a trusted proxy that sets X-Forwarded-For.
+      RATE_LIMIT_TRUST_FORWARDED: ${RATE_LIMIT_TRUST_FORWARDED:-false}
+
       # ── Email / Newsletter (SMTP) ──
       # Dev default points at the Mailpit catcher. Override SMTP_* for prod.
       SMTP_HOST: ${SMTP_HOST:-mailpit}
