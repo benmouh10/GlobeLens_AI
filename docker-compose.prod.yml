@@ -1,0 +1,51 @@
+# =============================================================================
+# GlobeLens AI — Production overrides
+# =============================================================================
+# Layered on top of docker-compose.yml to run the published, production-target
+# images instead of the local development ones.
+#
+# Usage (on a server with Docker Compose v2.24+):
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Pin a specific build for rollback safety (tags published by CI/CD as sha-<commit>):
+#   IMAGE_TAG=sha-8338c50 docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+#   IMAGE_TAG=sha-8338c50 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# What changes vs. the base (dev) file:
+#   * build.target -> production for the four app services
+#   * dev bind mounts removed (`!reset`); production code is baked into the image
+#   * APP_ENV / NODE_ENV forced to production
+#
+# Requires Compose v2.24+ for the `!reset` tag (it clears values inherited
+# from the base file instead of appending to them).
+# =============================================================================
+
+services:
+  backend:
+    build:
+      target: production
+    volumes: !reset []
+    environment:
+      APP_ENV: production
+
+  frontend:
+    build:
+      target: production
+    volumes: !reset []
+    environment:
+      NODE_ENV: production
+
+  worker:
+    build:
+      target: production
+    volumes: !reset []
+    environment:
+      APP_ENV: production
+
+  beat:
+    build:
+      target: production
+    volumes: !reset []
+    environment:
+      APP_ENV: production

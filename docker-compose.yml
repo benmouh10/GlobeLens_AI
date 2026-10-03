@@ -304,6 +304,8 @@ services:
   # Celery Worker — executes background tasks (newsletter dispatch, etc.)
   # ─────────────────────────────────────────────────────────────────────────
   worker:
+    # Same published backend image as `backend`; only the command differs.
+    image: ghcr.io/benmouh10/globelens_ai-backend:${IMAGE_TAG:-latest}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -353,6 +355,7 @@ services:
   # Celery Beat — scheduler that emits digest tasks on the configured cadence
   # ─────────────────────────────────────────────────────────────────────────
   beat:
+    image: ghcr.io/benmouh10/globelens_ai-backend:${IMAGE_TAG:-latest}
     build:
       context: ./backend
       dockerfile: Dockerfile
