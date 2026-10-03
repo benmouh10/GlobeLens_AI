@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.core.database import engine, get_db
 from app.core.logging import configure_logging
 from app.middleware.rate_limit import RateLimitMiddleware
+from app.middleware.security_headers import SecurityHeadersMiddleware
 
 # ── Controller (Router) imports ───────────────────────────────────────────────
 from app.controllers.auth_controller import router as auth_router
@@ -105,6 +106,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Added last so it is outermost: every response, including 429s and CORS
+# preflight replies, carries the hardening headers.
+app.add_middleware(SecurityHeadersMiddleware)
 
 # ── API Routers (v1) ──────────────────────────────────────────────────────────
 API_PREFIX = "/api/v1"

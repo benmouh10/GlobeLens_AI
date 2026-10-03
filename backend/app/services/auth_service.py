@@ -5,6 +5,7 @@ Handles password hashing, credential verification, and JWT issuance.
 """
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+import uuid
 
 from fastapi import HTTPException, status
 import bcrypt
@@ -80,8 +81,15 @@ class AuthService:
         Token expiration is determined by ACCESS_TOKEN_EXPIRE_MINUTES.
         """
         to_encode = data.copy()
-        expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        to_encode.update({"exp": expire})
+        now = datetime.now(timezone.utc)
+        expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        # iat records issuance time; jti gives every token a unique id so it can
+        # be referenced individually (auditing now, targeted revocation later).
+        to_encode.update({
+            "exp": expire,
+            "iat": now,
+            "jti": uuid.uuid4().hex,
+        })
 
         encoded_jwt = jwt.encode(
             to_encode,

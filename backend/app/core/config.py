@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     RATE_LIMIT_AUTH: str = "10/minute"
     RATE_LIMIT_TRUST_FORWARDED: bool = False
 
+    # ── Security response headers (see app/middleware/security_headers.py) ────
+    # HSTS is emitted automatically only when APP_ENV=production.
+    SECURITY_HEADERS_ENABLED: bool = True
+
     # ── PostgreSQL / pgvector ─────────────────────────────────────────────────
     # Async URL (asyncpg driver) — used by FastAPI runtime and SQLAlchemy engine
     DATABASE_URL: str = (

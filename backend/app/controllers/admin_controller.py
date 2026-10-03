@@ -6,10 +6,11 @@ DELETE /admin/users/{id} | /admin/comments/{id}
 POST /admin/events/promote | /admin/sources
 """
 from fastapi import APIRouter, Path, status, Depends, BackgroundTasks, HTTPException
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional
 
 from app.controllers.auth_controller import get_current_user
+from app.core.passwords import validate_password_strength
 from app.entities.models import User, UserRole
 from app.services.embedding_service import EmbeddingService
 from app.services.clustering_service import ClusteringService
@@ -54,6 +55,11 @@ class CreateUserRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
     role: str  # GUEST | AUTH_USER | JOURNALIST | ADMIN
+
+    @field_validator("password")
+    @classmethod
+    def _check_password(cls, value: str) -> str:
+        return validate_password_strength(value)
 
 
 class CreateSourceRequest(BaseModel):

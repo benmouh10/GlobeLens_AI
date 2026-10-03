@@ -228,6 +228,9 @@ services:
       # Only enable behind a trusted proxy that sets X-Forwarded-For.
       RATE_LIMIT_TRUST_FORWARDED: ${RATE_LIMIT_TRUST_FORWARDED:-false}
 
+      # ── Security response headers (HSTS auto-enabled when APP_ENV=production) ──
+      SECURITY_HEADERS_ENABLED: ${SECURITY_HEADERS_ENABLED:-true}
+
       # ── Email / Newsletter (SMTP) ──
       # Dev default points at the Mailpit catcher. Override SMTP_* for prod.
       SMTP_HOST: ${SMTP_HOST:-mailpit}

@@ -4,8 +4,9 @@ GlobeLens AI — User Pydantic Schemas
 Validates incoming registration/login payloads and filters API serialization.
 """
 import uuid
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from app.core.passwords import validate_password_strength
 from app.entities.models import UserRole
 
 
@@ -14,6 +15,11 @@ class UserRegister(BaseModel):
     name: str = Field(..., min_length=2, max_length=255, description="Full name of the user")
     email: EmailStr = Field(..., description="Unique email address")
     password: str = Field(..., min_length=8, max_length=128, description="Secure account password")
+
+    @field_validator("password")
+    @classmethod
+    def _check_password(cls, value: str) -> str:
+        return validate_password_strength(value)
 
 
 class UserLogin(BaseModel):
