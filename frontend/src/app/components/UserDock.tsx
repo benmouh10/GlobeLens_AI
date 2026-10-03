@@ -11,7 +11,7 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 /**
  * Bottom-left dock shared by every page via PrimaryNav. It hosts the Offline
  * library shortcut next to the Logout control so the top bar (and the search
- * field beside it) stays uncluttered. Admins keep their Logout in the header.
+ * field beside it) stays uncluttered.
  */
 export default function UserDock() {
   const router = useRouter();
@@ -54,8 +54,7 @@ export default function UserDock() {
   };
 
   const showOffline = pathname !== "/offline";
-  const showLogout =
-    authed && role !== null && role !== "ADMIN" && pathname !== "/profile";
+  const showLogout = authed && role !== null && pathname !== "/profile";
 
   if (!mounted) return null;
 

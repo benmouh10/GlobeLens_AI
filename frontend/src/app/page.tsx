@@ -247,15 +247,6 @@ export default function HomePage() {
               onSearchResults={handleSearchResults} 
               onClearSearch={handleClearSearch} 
             />
-            {authed && userRole === "ADMIN" && (
-              <button
-                onClick={handleLogout}
-                className="flex items-center gap-2 bg-cyber-rose/10 border border-cyber-rose/30 hover:bg-cyber-rose/20 text-cyber-rose text-[11px] font-bold tracking-wider uppercase font-mono-data px-3 py-2 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98]"
-              >
-                <LogOut className="w-4 h-4" />
-                Logout
-              </button>
-            )}
           </div>
         </header>
 
@@ -357,15 +348,6 @@ export default function HomePage() {
             onSearchResults={handleSearchResults} 
             onClearSearch={handleClearSearch} 
           />
-          {authed && userRole === "ADMIN" && (
-            <button
-              onClick={handleLogout}
-              className="flex items-center gap-2 bg-cyber-rose/10 border border-cyber-rose/30 hover:bg-cyber-rose/20 text-cyber-rose text-[11px] font-bold tracking-wider uppercase font-mono-data px-3 py-2 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98]"
-            >
-              <LogOut className="w-4 h-4" />
-              Logout
-            </button>
-          )}
         </div>
       </header>
 
