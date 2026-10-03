@@ -22,9 +22,12 @@ from app.controllers.article_controller import router as article_router
 from app.controllers.search_controller import router as search_router
 from app.controllers.fact_check_controller import router as fact_check_router
 from app.controllers.comment_controller import router as comment_router
+from app.controllers.reading_list_controller import router as reading_list_router
 from app.controllers.admin_controller import router as admin_router
 from app.controllers.chatbot_controller import router as chatbot_router
 from app.controllers.newsletter_controller import router as newsletter_router
+from app.controllers.push_controller import router as push_router
+from app.controllers.insights_controller import router as insights_router
 
 
 
@@ -109,9 +112,12 @@ app.include_router(article_router,    prefix=f"{API_PREFIX}/articles",    tags=[
 app.include_router(search_router,     prefix=f"{API_PREFIX}/search",      tags=["Search"])
 app.include_router(fact_check_router, prefix=f"{API_PREFIX}/fact-check",  tags=["Fact-Check"])
 app.include_router(comment_router,    prefix=API_PREFIX,                   tags=["Comments"])
+app.include_router(reading_list_router, prefix=f"{API_PREFIX}/users",      tags=["Reading Lists"])
 app.include_router(admin_router,      prefix=f"{API_PREFIX}/admin",       tags=["Admin"])
 app.include_router(chatbot_router,    prefix=f"{API_PREFIX}/chatbot",     tags=["Chatbot"])
 app.include_router(newsletter_router, prefix=f"{API_PREFIX}/newsletter",  tags=["Newsletter"])
+app.include_router(push_router,       prefix=f"{API_PREFIX}/push",         tags=["Push Notifications"])
+app.include_router(insights_router,   prefix=f"{API_PREFIX}/insights",     tags=["Insights"])
 
 
 

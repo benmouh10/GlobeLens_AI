@@ -23,9 +23,17 @@ import {
   ExternalLink,
   Newspaper,
   Share2,
-  Send
+  Send,
+  ListPlus,
+  Download
 } from "lucide-react";
 import PillNav from "../../components/PillNav";
+import {
+  getSavedEvent,
+  isEventSaved,
+  removeEventForOffline,
+  saveEventForOffline,
+} from "../../../lib/offline";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -130,6 +138,26 @@ export default function EventDetailPage() {
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [userRole, setUserRole] = useState<string | null>(null);
   const [bookmarkPending, setBookmarkPending] = useState(false);
+
+  // Device-local offline snapshot. Deliberately independent of the account
+  // bookmark: it is about making the dossier readable on this machine without a
+  // connection, so it works for signed-out readers too.
+  const [savedOffline, setSavedOffline] = useState(false);
+  const [offlinePending, setOfflinePending] = useState(false);
+  const [offlineSnapshotAt, setOfflineSnapshotAt] = useState<number | null>(null);
+
+  // "Save to List" picker. Kept separate from the quick bookmark toggle: the
+  // bookmark is a one-click flat save, a reading list is a deliberate,
+  // named placement.
+  const [showListModal, setShowListModal] = useState(false);
+  const [readingLists, setReadingLists] = useState<
+    { id: string; name: string; item_count: number }[]
+  >([]);
+  const [listModalLoading, setListModalLoading] = useState(false);
+  const [listModalError, setListModalError] = useState<string | null>(null);
+  const [newListName, setNewListName] = useState("");
+  const [listModalBusy, setListModalBusy] = useState(false);
+  const [savedToListId, setSavedToListId] = useState<string | null>(null);
   
   const [factCheck, setFactCheck] = useState<FactCheckResult | null>(null);
   const [factCheckLoading, setFactCheckLoading] = useState(false);
@@ -173,7 +201,15 @@ export default function EventDetailPage() {
       }
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "Failed to connect to synthesis server");
+      // Network failed. If the reader saved this dossier, show the frozen copy
+      // clearly labelled as a snapshot rather than a dead-end error page.
+      const saved = await getSavedEvent(id);
+      if (saved) {
+        setEvent(saved.event);
+        setOfflineSnapshotAt(saved.savedAt);
+      } else {
+        setError(err.message || "Failed to connect to synthesis server");
+      }
     } finally {
       setLoading(false);
     }
@@ -229,6 +265,39 @@ export default function EventDetailPage() {
     };
   }, [id]);
 
+  // Reflect whether a device-local snapshot already exists for this dossier.
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    isEventSaved(id).then((yes) => {
+      if (!cancelled) setSavedOffline(yes);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  const handleOfflineToggle = async () => {
+    if (offlinePending) return;
+    setOfflinePending(true);
+    try {
+      if (savedOffline) {
+        await removeEventForOffline(id);
+        setSavedOffline(false);
+        setOfflineSnapshotAt(null);
+      } else if (event) {
+        const saved = await saveEventForOffline(event);
+        setSavedOffline(true);
+        setOfflineSnapshotAt(saved.savedAt);
+      }
+    } catch (err) {
+      console.error("Offline save failed", err);
+      alert("Could not save this dossier for offline reading.");
+    } finally {
+      setOfflinePending(false);
+    }
+  };
+
   const handleBookmarkToggle = async () => {
     // Honest failure first: the event page is public, so most visitors have no
     // token. Previously this toggled local state only, so the button claimed
@@ -281,6 +350,100 @@ export default function EventDetailPage() {
       alert("Could not update bookmarks. Please try again.");
     } finally {
       setBookmarkPending(false);
+    }
+  };
+
+  const loadReadingLists = async (token: string, userId: string) => {
+    const res = await fetch(`${API_BASE_URL}/api/v1/users/${userId}/reading-lists`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`Could not load your lists (${res.status})`);
+    const data = await res.json();
+    setReadingLists(
+      (data.reading_lists || []).map((l: { id: string; name: string; item_count: number }) => ({
+        id: l.id,
+        name: l.name,
+        item_count: l.item_count,
+      }))
+    );
+  };
+
+  const openListModal = async () => {
+    if (!authToken) {
+      alert("Sign in to save dossiers to a reading list.");
+      router.push("/login");
+      return;
+    }
+    setShowListModal(true);
+    setListModalError(null);
+    setSavedToListId(null);
+    setListModalLoading(true);
+    try {
+      const userId = await resolveUserId(authToken);
+      await loadReadingLists(authToken, userId);
+    } catch (err: any) {
+      setListModalError(err.message || "Could not load your reading lists");
+    } finally {
+      setListModalLoading(false);
+    }
+  };
+
+  const addToList = async (listId: string) => {
+    if (!authToken || listModalBusy) return;
+    setListModalBusy(true);
+    setListModalError(null);
+    try {
+      const userId = await resolveUserId(authToken);
+      const res = await fetch(
+        `${API_BASE_URL}/api/v1/users/${userId}/reading-lists/${listId}/items`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ event_id: id }),
+        }
+      );
+      if (!res.ok) throw new Error(`Could not save to list (${res.status})`);
+      setSavedToListId(listId);
+      setReadingLists((prev) =>
+        prev.map((l) => (l.id === listId ? { ...l, item_count: l.item_count + 1 } : l))
+      );
+    } catch (err: any) {
+      setListModalError(err.message || "Could not save to list");
+    } finally {
+      setListModalBusy(false);
+    }
+  };
+
+  const createListThenAdd = async () => {
+    if (!authToken || listModalBusy) return;
+    const name = newListName.trim();
+    if (!name) {
+      setListModalError("Give the list a name first");
+      return;
+    }
+    setListModalBusy(true);
+    setListModalError(null);
+    try {
+      const userId = await resolveUserId(authToken);
+      const createRes = await fetch(`${API_BASE_URL}/api/v1/users/${userId}/reading-lists`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${authToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!createRes.ok) {
+        const data = await createRes.json().catch(() => ({}));
+        throw new Error(data.detail || `Could not create list (${createRes.status})`);
+      }
+      const created = await createRes.json();
+      setNewListName("");
+      setReadingLists((prev) => [{ id: created.id, name: created.name, item_count: 0 }, ...prev]);
+      await addToList(created.id);
+    } catch (err: any) {
+      setListModalError(err.message || "Could not create list");
+      setListModalBusy(false);
     }
   };
 
@@ -623,7 +786,7 @@ export default function EventDetailPage() {
               },
               { label: 'Profile', href: '/profile' },
               ...(showAdmin ? [{ label: 'Admin', href: '/admin/dashboard' }] : []),
-              { label: 'Dispatches', href: '/dispatches' }, { label: 'Fact Checker', href: '/fact-checker' }
+              { label: 'Dispatches', href: '/dispatches' }, { label: 'Reading Lists', href: '/reading-lists' }, { label: 'Newsletter', href: '/newsletter' }, { label: 'Fact Checker', href: '/fact-checker' }, { label: 'Offline', href: '/offline' }
             ]}
             activeHref=""
             baseColor="#080c16"
@@ -701,7 +864,7 @@ export default function EventDetailPage() {
             },
             { label: 'Profile', href: '/profile' },
             ...(showAdmin ? [{ label: 'Admin', href: '/admin/dashboard' }] : []),
-            { label: 'Dispatches', href: '/dispatches' }, { label: 'Fact Checker', href: '/fact-checker' }
+            { label: 'Dispatches', href: '/dispatches' }, { label: 'Reading Lists', href: '/reading-lists' }, { label: 'Newsletter', href: '/newsletter' }, { label: 'Fact Checker', href: '/fact-checker' }, { label: 'Offline', href: '/offline' }
           ]}
           activeHref=""
           baseColor="#080c16"
@@ -718,6 +881,18 @@ export default function EventDetailPage() {
         {/* Main Content Canvas (9 Cols) */}
         <main className="col-span-1 lg:col-span-9 flex flex-col gap-stack-lg pb-stack-lg">
           
+          {offlineSnapshotAt && (
+            <div className="flex items-center gap-2 rounded border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] font-mono-data text-amber-400 print:hidden">
+              <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+              <span>
+                Offline copy — saved {new Date(offlineSnapshotAt).toLocaleString("en-GB", {
+                  day: "2-digit", month: "short", year: "numeric",
+                  hour: "2-digit", minute: "2-digit",
+                })}. Live updates, comments and source links are unavailable.
+              </span>
+            </div>
+          )}
+
           {/* Article Header Area */}
           <article className="flex flex-col gap-stack-md relative z-10">
             {/* Meta tags row */}
@@ -785,6 +960,37 @@ export default function EventDetailPage() {
                       : isBookmarked
                       ? "Saved to Dossiers"
                       : "Bookmark Intel"}
+                  </span>
+                </button>
+
+                {/* Save to Reading List */}
+                <button
+                  onClick={openListModal}
+                  title={authToken ? "Add this dossier to a named reading list" : "Sign in to use reading lists"}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-surface-container border border-outline-variant text-on-surface hover:border-primary rounded font-body-sm text-body-sm transition-colors"
+                >
+                  <ListPlus className="w-[18px] h-[18px]" />
+                  <span>Save to List</span>
+                </button>
+
+                {/* Save offline — device-local snapshot, no account required */}
+                <button
+                  onClick={handleOfflineToggle}
+                  disabled={offlinePending}
+                  title={
+                    savedOffline
+                      ? "Remove the offline copy from this device"
+                      : "Save this dossier to read offline on this device"
+                  }
+                  className={`flex items-center gap-2 px-3 py-1.5 bg-surface-container border rounded font-body-sm text-body-sm transition-colors disabled:opacity-60 disabled:cursor-wait ${
+                    savedOffline
+                      ? "border-primary text-primary"
+                      : "border-outline-variant text-on-surface hover:border-primary"
+                  }`}
+                >
+                  <Download className="w-[18px] h-[18px]" />
+                  <span>
+                    {offlinePending ? "Saving..." : savedOffline ? "Saved Offline" : "Save Offline"}
                   </span>
                 </button>
               </div>
@@ -1332,6 +1538,105 @@ export default function EventDetailPage() {
           <a className="text-on-surface-variant hover:text-primary transition-colors" href="#">System Ethics Policy</a>
         </nav>
       </footer>
+
+      {/* Save to Reading List modal */}
+      {showListModal && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm px-4"
+          onClick={() => !listModalBusy && setShowListModal(false)}
+        >
+          <div
+            className="w-full max-w-md bg-[#0c101b] border border-indigo-500/20 rounded-2xl shadow-[0_0_50px_rgba(6,182,212,0.15)] p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <h3 className="text-lg font-bold text-white">Save to Reading List</h3>
+                <p className="text-xs text-zinc-500 mt-0.5">{event.title}</p>
+              </div>
+              <button
+                onClick={() => !listModalBusy && setShowListModal(false)}
+                className="text-zinc-500 hover:text-white transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+
+            {listModalError && (
+              <div className="mb-4 p-2.5 rounded-lg bg-cyber-rose/10 border border-cyber-rose/30 text-cyber-rose text-xs font-mono-data uppercase tracking-wider">
+                {listModalError}
+              </div>
+            )}
+
+            <div className="max-h-64 overflow-y-auto no-scrollbar space-y-1.5 mb-4">
+              {listModalLoading ? (
+                <p className="text-xs text-zinc-500 py-4 text-center">Loading your lists…</p>
+              ) : readingLists.length === 0 ? (
+                <p className="text-xs text-zinc-500 py-4 text-center">
+                  No lists yet — create one below.
+                </p>
+              ) : (
+                readingLists.map((l) => (
+                  <button
+                    key={l.id}
+                    onClick={() => addToList(l.id)}
+                    disabled={listModalBusy}
+                    className={`w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl border transition-all text-left disabled:opacity-60 ${
+                      savedToListId === l.id
+                        ? "border-primary/50 bg-primary/10"
+                        : "border-outline-variant hover:border-primary/40 hover:bg-white/[0.03]"
+                    }`}
+                  >
+                    <span className="min-w-0">
+                      <span className="block text-sm text-zinc-200 truncate">{l.name}</span>
+                      <span className="block font-mono-data text-[10px] uppercase tracking-wider text-zinc-500">
+                        {l.item_count} {l.item_count === 1 ? "item" : "items"}
+                      </span>
+                    </span>
+                    <span className="shrink-0 font-mono-data text-[10px] uppercase tracking-wider text-primary">
+                      {savedToListId === l.id ? "Saved" : "Add"}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+
+            <div className="border-t border-indigo-950/40 pt-4">
+              <label className="block font-mono-data text-[10px] text-zinc-400 uppercase tracking-widest font-bold mb-2">
+                Create new list
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={newListName}
+                  onChange={(e) => setNewListName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") createListThenAdd();
+                  }}
+                  placeholder="e.g. Iran watch"
+                  className="flex-1 bg-zinc-950/60 border border-outline-variant rounded-xl px-3 py-2 text-sm text-zinc-200 focus:outline-none focus:border-primary transition-all"
+                />
+                <button
+                  onClick={createListThenAdd}
+                  disabled={listModalBusy}
+                  className="shrink-0 px-3 py-2 bg-primary/10 hover:bg-primary/20 border border-primary/30 text-primary font-mono-data text-[11px] font-bold tracking-widest uppercase rounded-xl transition-all disabled:opacity-60"
+                >
+                  Create &amp; Add
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={() => router.push("/reading-lists")}
+                className="text-xs text-zinc-500 hover:text-primary font-mono-data uppercase tracking-wider transition-colors"
+              >
+                View all lists →
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

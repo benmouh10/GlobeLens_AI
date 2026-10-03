@@ -79,6 +79,53 @@ class Settings(BaseSettings):
     #   CORS_ORIGINS=["http://localhost:3000"]      (JSON array)
     CORS_ORIGINS: Any = ["http://localhost:3000"]
 
+    # ── Email / Newsletter (SMTP) ─────────────────────────────────────────────
+    # The development default targets the Mailpit catcher service defined in
+    # docker-compose (SMTP on 1025, no auth, no TLS), so a fresh checkout can
+    # send and inspect real mail without external credentials. Production
+    # overrides these via SMTP_* environment variables.
+    SMTP_HOST: str = "mailpit"
+    SMTP_PORT: int = 1025
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_EMAIL: str = "newsletter@globelens.ai"
+    SMTP_FROM_NAME: str = "GlobeLens AI"
+    SMTP_STARTTLS: bool = False
+    SMTP_SSL: bool = False
+    SMTP_TIMEOUT_SECONDS: int = 15
+
+    # Public base URLs embedded in outbound email links (confirm / unsubscribe
+    # / open an event). Kept separate because the API and the web client are
+    # distinct origins.
+    FRONTEND_URL: str = "http://localhost:3000"
+    API_PUBLIC_URL: str = "http://localhost:8000"
+
+    # ── Newsletter scheduling ─────────────────────────────────────────────────
+    NEWSLETTER_DAILY_TOP_N: int = 5
+    NEWSLETTER_WEEKLY_TOP_N: int = 8
+    NEWSLETTER_DAILY_HOUR_UTC: int = 7
+    NEWSLETTER_WEEKLY_DAY: str = "monday"
+    NEWSLETTER_WEEKLY_HOUR_UTC: int = 8
+
+    # ── Celery (background jobs) ──────────────────────────────────────────────
+    # Falls back to REDIS_URL when unset, so enabling the worker needs no extra
+    # configuration in development.
+    CELERY_BROKER_URL: str = ""
+    CELERY_RESULT_BACKEND: str = ""
+
+    # ── Web Push (VAPID) ──────────────────────────────────────────────────────
+    # Generate a keypair with the cryptography package (P-256), url-safe base64
+    # without padding. The private key signs every request; the public key is
+    # handed to the browser. /push/vapid-public-key reports `enabled: false`
+    # until both are set. PUSH_DAILY_BRIEFING_HOUR_UTC drives the beat task.
+    VAPID_PUBLIC_KEY: str = ""
+    VAPID_PRIVATE_KEY: str = ""
+    VAPID_SUBJECT: str = "mailto:ops@globelens.ai"
+    PUSH_DAILY_BRIEFING_HOUR_UTC: int = 8
+    # Seconds the push service should retain an undelivered message. Must be
+    # non-zero: Windows Push Notification Service answers ttl=0 with 400.
+    PUSH_TTL_SECONDS: int = 3600
+
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def parse_cors_origins(cls, v: Any) -> List[str]:
@@ -91,6 +138,14 @@ class Settings(BaseSettings):
                 return json.loads(v)
             return [origin.strip() for origin in v.split(",") if origin.strip()]
         return v
+
+    @property
+    def celery_broker(self) -> str:
+        return self.CELERY_BROKER_URL or self.REDIS_URL
+
+    @property
+    def celery_backend(self) -> str:
+        return self.CELERY_RESULT_BACKEND or self.REDIS_URL
 
     @property
     def SYNC_DATABASE_URL(self) -> str:

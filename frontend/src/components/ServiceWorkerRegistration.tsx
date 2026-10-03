@@ -4,7 +4,9 @@ import { useEffect } from "react";
 
 export default function ServiceWorkerRegistration() {
   useEffect(() => {
-    if (process.env.NODE_ENV !== "production") return;
+    // Registered in development too: Web Push needs an active service worker,
+    // and it would otherwise be impossible to try notifications locally. The
+    // worker itself disables asset caching on localhost to protect hot reload.
     if (!("serviceWorker" in navigator)) return;
 
     const register = () => {

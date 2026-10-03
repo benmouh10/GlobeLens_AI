@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    Boolean, CheckConstraint, DateTime, Enum, Float, ForeignKey,
+    Boolean, CheckConstraint, DateTime, Enum, Float, ForeignKey, Integer,
     String, Text, UniqueConstraint, func
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
@@ -111,6 +111,7 @@ class User(Base):
     # Deleting an author keeps their published articles; the FK is ON DELETE
     # SET NULL, so passive_deletes lets PostgreSQL detach them.
     authored_articles: Mapped[List["Article"]] = relationship("Article", back_populates="author", passive_deletes=True)
+    reading_lists: Mapped[List["ReadingList"]] = relationship("ReadingList", back_populates="user", passive_deletes=True)
 
 
 # ── Event ─────────────────────────────────────────────────────────────────────
@@ -257,6 +258,143 @@ class Bookmark(Base):
 
     user: Mapped["User"] = relationship("User", back_populates="bookmarks")
     event: Mapped["Event"] = relationship("Event")
+
+
+# ── Reading List ──────────────────────────────────────────────────────────────
+class ReadingList(Base):
+    """A user-curated, named collection of events and newsroom articles.
+
+    Bookmarks answer "did I save this?" with a single flat set. A reading list
+    is the editorial layer on top: named collections ("Iran watch", "Climate")
+    that can be reordered and exported. Names are unique per user so the picker
+    never offers two indistinguishable lists.
+    """
+    __tablename__ = "reading_lists"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_reading_list_user_name"),
+    )
+
+    id: Mapped[uuid.UUID]          = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID]     = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str]              = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    is_public: Mapped[bool]        = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user: Mapped["User"] = relationship("User", back_populates="reading_lists")
+    items: Mapped[List["ReadingListItem"]] = relationship(
+        "ReadingListItem",
+        back_populates="reading_list",
+        cascade="all, delete-orphan",
+        order_by="ReadingListItem.position.asc()",
+    )
+
+
+class ReadingListItem(Base):
+    """One saved unit inside a reading list — an Event or an authored Article.
+
+    Mirrors Comment: exactly one of event_id / article_id is set. The FK cascade
+    means deleting the underlying event/article removes the stale list entry
+    rather than leaving a row that points at nothing.
+    """
+    __tablename__ = "reading_list_items"
+    __table_args__ = (
+        CheckConstraint(
+            "(event_id IS NOT NULL) <> (article_id IS NOT NULL)",
+            name="ck_reading_list_item_exactly_one_target",
+        ),
+        UniqueConstraint("list_id", "event_id", name="uq_reading_list_item_event"),
+        UniqueConstraint("list_id", "article_id", name="uq_reading_list_item_article"),
+    )
+
+    id: Mapped[uuid.UUID]            = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    list_id: Mapped[uuid.UUID]       = mapped_column(UUID(as_uuid=True), ForeignKey("reading_lists.id", ondelete="CASCADE"), index=True)
+    event_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("events.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    article_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("articles.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    position: Mapped[int]            = mapped_column(Integer, default=0)
+    note: Mapped[Optional[str]]      = mapped_column(Text)
+    created_at: Mapped[datetime]     = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    reading_list: Mapped["ReadingList"] = relationship("ReadingList", back_populates="items")
+    event: Mapped[Optional["Event"]]    = relationship("Event")
+    article: Mapped[Optional["Article"]] = relationship("Article")
+
+
+# ── NewsletterSubscriber ───────────────────────────────────────────────────────
+class NewsletterSubscriber(Base):
+    """An email recipient for the daily / weekly digest.
+
+    Deliberately separate from User: most subscribers are anonymous readers who
+    only supplied an email, and linking to an account is optional (user_id is
+    SET NULL if the account is deleted). Delivery requires a confirmed address
+    (double opt-in), so is_confirmed gates sending alongside is_active, which
+    the unsubscribe link flips.
+    """
+    __tablename__ = "newsletter_subscribers"
+
+    id: Mapped[uuid.UUID]          = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email: Mapped[str]             = mapped_column(String(320), nullable=False, unique=True, index=True)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    interests: Mapped[Optional[List[str]]] = mapped_column(ARRAY(String), default=list)
+    # "daily" or "weekly"; stored as text so a new cadence needs no enum migration.
+    frequency: Mapped[str]         = mapped_column(String(20), default="daily", index=True)
+    is_active: Mapped[bool]        = mapped_column(Boolean, default=True, index=True)
+    is_confirmed: Mapped[bool]     = mapped_column(Boolean, default=False, index=True)
+    confirm_token: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True, nullable=True)
+    unsubscribe_token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    created_at: Mapped[datetime]   = mapped_column(DateTime(timezone=True), server_default=func.now())
+    confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    unsubscribed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+# ── PushSubscription ───────────────────────────────────────────────────────────
+class PushSubscription(Base):
+    """A browser Web Push subscription belonging to a user.
+
+    One user may have many (one per browser/device). `endpoint` is the unique
+    address issued by the browser's push service; `p256dh` and `auth` are the
+    client keys used to encrypt each payload. ON DELETE CASCADE removes rows with
+    the account so we never retain push addresses for deleted users.
+    """
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[uuid.UUID]        = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID]   = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    endpoint: Mapped[str]        = mapped_column(Text, nullable=False, unique=True)
+    p256dh: Mapped[str]          = mapped_column(Text, nullable=False)
+    auth: Mapped[str]            = mapped_column(Text, nullable=False)
+    user_agent: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+# ── PushPreference ─────────────────────────────────────────────────────────────
+class PushPreference(Base):
+    """Per-user opt-ins controlling which notification categories are delivered."""
+    __tablename__ = "push_preferences"
+
+    id: Mapped[uuid.UUID]        = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID]   = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    breaking_news: Mapped[bool]  = mapped_column(Boolean, default=True)
+    followed_events: Mapped[bool] = mapped_column(Boolean, default=True)
+    daily_briefing: Mapped[bool] = mapped_column(Boolean, default=False)
+    briefing_hour_utc: Mapped[int] = mapped_column(Integer, default=8)
+    timezone: Mapped[str]        = mapped_column(String(64), default="UTC")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 # ── EventContradiction ────────────────────────────────────────────────────────

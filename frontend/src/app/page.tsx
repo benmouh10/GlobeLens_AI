@@ -100,10 +100,8 @@ export default function HomePage() {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((res) => (res.ok ? res.json() : null))
-      .then((me) => {
-        if (me) setUserRole(me.role);
-      })
-      .catch(() => {});
+      .then((me) => setUserRole(me && me.role ? me.role : "AUTH_USER"))
+      .catch(() => setUserRole("AUTH_USER"));
   }, []);
 
   // Admin console is only relevant to administrators
@@ -253,7 +251,7 @@ export default function HomePage() {
               },
               { label: 'Profile', href: '/profile' },
               ...(showAdmin ? [{ label: 'Admin', href: '/admin/dashboard' }] : []),
-              { label: 'Dispatches', href: '/dispatches' }, { label: 'Fact Checker', href: '/fact-checker' }
+              { label: 'Dispatches', href: '/dispatches' }, { label: 'Reading Lists', href: '/reading-lists' }, { label: 'Newsletter', href: '/newsletter' }, { label: 'Fact Checker', href: '/fact-checker' }, { label: 'Offline', href: '/offline' }
             ]}
             activeHref={viewMode === "standard" ? "/?view=standard" : "/?view=map"}
             baseColor="#080c16"
@@ -262,13 +260,13 @@ export default function HomePage() {
             pillTextColor="#94a3b8"
             initialLoadAnimation={false}
           />
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 flex-1 min-w-0 justify-end ml-4">
             <SearchBar 
               onSelectEvent={setSelectedEvent} 
               onSearchResults={handleSearchResults} 
               onClearSearch={handleClearSearch} 
             />
-            {authed && (
+            {authed && userRole === "ADMIN" && (
               <button
                 onClick={handleLogout}
                 className="flex items-center gap-2 bg-cyber-rose/10 border border-cyber-rose/30 hover:bg-cyber-rose/20 text-cyber-rose text-[11px] font-bold tracking-wider uppercase font-mono-data px-3 py-2 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98]"
@@ -345,6 +343,17 @@ export default function HomePage() {
             Reset All Filters
           </button>
         </main>
+
+        {/* Logout — docked bottom-left for readers and journalists */}
+        {authed && userRole && userRole !== "ADMIN" && (
+          <button
+            onClick={handleLogout}
+            className="fixed bottom-6 left-6 z-40 flex items-center gap-2 bg-cyber-rose/10 backdrop-blur-md border border-cyber-rose/30 hover:bg-cyber-rose/20 text-cyber-rose text-[11px] font-bold tracking-wider uppercase font-mono-data px-3 py-2 rounded-xl shadow-[0_4px_20px_rgba(244,63,94,0.25)] transition-all hover:scale-[1.02] active:scale-[0.98]"
+          >
+            <LogOut className="w-4 h-4" />
+            Logout
+          </button>
+        )}
       </div>
     );
   }
@@ -381,7 +390,7 @@ export default function HomePage() {
             },
             { label: 'Profile', href: '/profile' },
             ...(showAdmin ? [{ label: 'Admin', href: '/admin/dashboard' }] : []),
-            { label: 'Dispatches', href: '/dispatches' }, { label: 'Fact Checker', href: '/fact-checker' }
+            { label: 'Dispatches', href: '/dispatches' }, { label: 'Reading Lists', href: '/reading-lists' }, { label: 'Newsletter', href: '/newsletter' }, { label: 'Fact Checker', href: '/fact-checker' }, { label: 'Offline', href: '/offline' }
           ]}
           activeHref={viewMode === "standard" ? "/?view=standard" : "/?view=map"}
           baseColor="#080c16"
@@ -390,13 +399,13 @@ export default function HomePage() {
           pillTextColor="#94a3b8"
           initialLoadAnimation={true}
         />
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 flex-1 min-w-0 justify-end ml-4">
           <SearchBar 
             onSelectEvent={setSelectedEvent} 
             onSearchResults={handleSearchResults} 
             onClearSearch={handleClearSearch} 
           />
-          {authed && (
+          {authed && userRole === "ADMIN" && (
             <button
               onClick={handleLogout}
               className="flex items-center gap-2 bg-cyber-rose/10 border border-cyber-rose/30 hover:bg-cyber-rose/20 text-cyber-rose text-[11px] font-bold tracking-wider uppercase font-mono-data px-3 py-2 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98]"
@@ -705,6 +714,18 @@ export default function HomePage() {
             </nav>
           </footer>
         </div>
+      )}
+
+      {/* Logout — docked bottom-left for readers and journalists. Admins keep
+          the header control, which leaves the search bar more room. */}
+      {authed && userRole && userRole !== "ADMIN" && (
+        <button
+          onClick={handleLogout}
+          className="fixed bottom-6 left-6 z-40 flex items-center gap-2 bg-cyber-rose/10 backdrop-blur-md border border-cyber-rose/30 hover:bg-cyber-rose/20 text-cyber-rose text-[11px] font-bold tracking-wider uppercase font-mono-data px-3 py-2 rounded-xl shadow-[0_4px_20px_rgba(244,63,94,0.25)] transition-all hover:scale-[1.02] active:scale-[0.98]"
+        >
+          <LogOut className="w-4 h-4" />
+          Logout
+        </button>
       )}
     </div>
   );

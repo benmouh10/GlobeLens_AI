@@ -184,6 +184,7 @@ export default function FactCheckerPage() {
             <a className="font-body-md text-body-md text-on-surface-variant font-medium hover:text-cyber-cyan transition-colors" href="/?view=map">Map</a>
             <a className="font-body-md text-body-md text-on-surface-variant font-medium hover:text-cyber-cyan transition-colors" href="/admin/dashboard">Admin</a>
             <a className="font-body-md text-body-md text-cyber-cyan font-bold border-b-2 border-cyber-cyan pb-1" href="/fact-checker">Fact Checker</a>
+            <a className="font-body-md text-body-md text-on-surface-variant font-medium hover:text-cyber-cyan transition-colors" href="/offline">Offline</a>
           </div>
         </div>
         <div className="flex items-center gap-4">

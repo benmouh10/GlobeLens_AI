@@ -274,9 +274,12 @@ export default function NewsroomPage() {
               },
             },
             { label: "Dispatches", href: "/dispatches" },
+            { label: "Reading Lists", href: "/reading-lists" },
+            { label: "Newsletter", href: "/newsletter" },
             { label: "Profile", href: "/profile" },
             ...(me?.role === "ADMIN" ? [{ label: "Admin", href: "/admin/dashboard" }] : []),
             { label: "Fact Checker", href: "/fact-checker" },
+            { label: "Offline", href: "/offline" },
           ]}
           activeHref="/newsroom"
           baseColor="#080c16"

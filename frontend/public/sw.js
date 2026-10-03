@@ -1,15 +1,25 @@
 /*
  * GlobeLens service worker.
  *
- * Scope is deliberately narrow. News data must never be served stale: a
- * cached intelligence summary reads as current fact, and this app exists to
- * tell readers what is true right now. So the API is network-only with no
- * fallback, and only immutable static assets are cached.
+ * Two jobs:
+ *   1. Static asset caching (production only).
+ *   2. Making the Offline Library reachable: "/offline" is precached at install
+ *      and successful navigations are cached so a saved dossier's shell can load
+ *      with no network. The API stays network-only — cached news would read as
+ *      current fact. Offline pages render an explicitly labelled saved snapshot
+ *      or the library, never stale reporting presented as live.
  */
 
-const VERSION = "gl-lens-v2";
+const VERSION = "gl-lens-v4";
 const SHELL = `${VERSION}-shell`;
 const ASSETS = `${VERSION}-assets`;
+
+// Dev serves unhashed chunks that change on every edit. Registering the worker
+// for push is required even in development, but caching those chunks would
+// serve a stale bundle and break hot reload, so caching is production-only.
+const DEV =
+  self.location.hostname === "localhost" ||
+  self.location.hostname === "127.0.0.1";
 
 // Never cache these: either live data or an error page that would masquerade
 // as real content.
@@ -18,11 +28,22 @@ const NEVER_CACHE = ["/api/", "/graphql", "_next/webpack-hmr"];
 const CURRENT = new Set([SHELL, ASSETS]);
 
 self.addEventListener("install", (event) => {
-  // No precache. The shell needs session cookies and live API calls, so
-  // caching it would only serve a login page offline.
+  // Precache the Offline Library. It is a static client route with no user
+  // data, so it is safe to store and it guarantees an offline entry point.
   // skipWaiting must be inside waitUntil, otherwise the install can be marked
   // complete before it takes effect.
-  event.waitUntil(self.skipWaiting());
+  event.waitUntil(
+    (async () => {
+      try {
+        const cache = await caches.open(SHELL);
+        await cache.add(new Request("/offline", { cache: "reload" }));
+      } catch (err) {
+        // A failed precache must not block activation; the worker still serves
+        // the network and the offline fallback page.
+      }
+      await self.skipWaiting();
+    })()
+  );
 });
 
 self.addEventListener("activate", (event) => {
@@ -56,7 +77,7 @@ a{color:#60a5fa;font-size:.875rem}</style></head><body><div>
 <p>GlobeLens could not reach the network. Event intelligence is served live
 and never cached, so nothing is shown here rather than risk presenting stale
 reporting as current.</p>
-<a href="/">Try again</a></div></body></html>`;
+<a href="/offline">Open your Offline Library</a> &nbsp;·&nbsp; <a href="/">Try again</a></div></body></html>`;
 
 function offlineResponse() {
   return new Response(OFFLINE_PAGE, {
@@ -81,6 +102,9 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   if (NEVER_CACHE.some((prefix) => url.pathname.startsWith(prefix))) return;
 
+  // In dev, let the network serve assets untouched (see DEV above).
+  if (DEV && isAsset(url)) return;
+
   // Static build output is content-hashed, so a hit is always correct.
   if (isAsset(url)) {
     event.respondWith(
@@ -103,22 +127,79 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Navigations: network first, so a deploy is picked up immediately.
-  // On failure serve an inline page rather than a cached route. GlobeLens
-  // deliberately does not cache news responses, so there is nothing
-  // trustworthy to show and no stale intelligence to risk presenting.
+  // Navigations: network first, so a deploy is picked up immediately. On
+  // failure, serve a previously cached shell for the same path, then the
+  // Offline Library, then the fallback page. Cached HTML is a client-rendered
+  // shell carrying no news data; offline the page shows an explicitly labelled
+  // saved snapshot or the library, never stale reporting as if it were live.
   if (request.mode === "navigate") {
-    // A prerendered route like "/" is also in the browser's own HTTP cache, so
-    // a plain fetch() while offline can be answered from that cache and
-    // succeed. The reader would then see an empty-looking shell that reads as
-    // "no news" rather than "no connection". Checking onLine first makes the
-    // offline state explicit; cache:"no-store" stops the HTTP cache from
-    // masking it if onLine is optimistic.
     event.respondWith(
-      (self.navigator.onLine === false
-        ? Promise.reject(new Error("offline"))
-        : fetch(request, { cache: "no-store" })
-      ).catch(() => offlineResponse())
+      (async () => {
+        const cache = await caches.open(SHELL);
+        const fallback = async () =>
+          (await cache.match(new URL(request.url).pathname)) ||
+          (await cache.match("/offline")) ||
+          offlineResponse();
+
+        // A prerendered route is also in the browser's own HTTP cache, so a
+        // plain fetch() while offline can be answered from that cache and
+        // succeed, showing an empty shell that reads as "no news". Checking
+        // onLine first makes the offline state explicit.
+        if (self.navigator.onLine === false) return fallback();
+
+        try {
+          const response = await fetch(request, { cache: "no-store" });
+          if (response.ok && response.type === "basic") {
+            cache.put(new URL(request.url).pathname, response.clone());
+          }
+          return response;
+        } catch (err) {
+          return fallback();
+        }
+      })()
     );
   }
+});
+
+// ── Web Push ──────────────────────────────────────────────────────────────────
+// The server sends a JSON payload {title, body, url, tag, data}. The push
+// service delivers it end-to-end encrypted; we decrypt by reading event.data.
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch (err) {
+    payload = { title: "GlobeLens AI", body: event.data ? event.data.text() : "" };
+  }
+  const title = payload.title || "GlobeLens AI";
+  const options = {
+    body: payload.body || "",
+    icon: "/icon-dark-32x32.png",
+    badge: "/icon-dark-32x32.png",
+    tag: payload.tag || "globe-lens",
+    // Re-alert for a newer story under the same tag rather than silently
+    // replacing it, since each push is a distinct intelligence event.
+    renotify: true,
+    data: { url: payload.url || "/", ...(payload.data || {}) },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+// Focus an existing GlobeLens tab on the target URL, or open a new one.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const data = event.notification.data || {};
+  const target = data.url || "/";
+  event.waitUntil(
+    (async () => {
+      const windows = await self.clients.matchAll({
+        type: "window",
+        includeUncontrolled: true,
+      });
+      for (const client of windows) {
+        if (client.url.includes(target) && "focus" in client) return client.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(target);
+    })()
+  );
 });

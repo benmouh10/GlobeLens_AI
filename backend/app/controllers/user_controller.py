@@ -6,12 +6,22 @@ from fastapi import APIRouter, Path, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 import uuid
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, union_all
 
 from app.core.database import get_db
 from app.controllers.auth_controller import get_current_user
-from app.entities.models import User, Bookmark, Event, Article, Source
+from app.entities.models import (
+    User,
+    Bookmark,
+    Event,
+    Article,
+    Source,
+    ReadingList,
+    ReadingListItem,
+)
+from app.services.insights_service import weekly_bias_message as _weekly_bias_message
 
 router = APIRouter()
 
@@ -232,7 +242,11 @@ async def get_reading_stats(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Reading stats computed from real data.
+    Reading habits computed from what the user has actually saved.
+
+    Saves are the only per-user reading signal this product records (bookmarks
+    plus reading-list entries); there is no page-view/read tracking, so nothing
+    here is described as something the user "read".
 
     This previously returned invented numbers (142 events read, 1250 points,
     a fixed 40/45/15 bias split). Showing a user fabricated figures about their
@@ -247,51 +261,91 @@ async def get_reading_stats(
     if current_user.role != "ADMIN" and current_user.id != user_uuid:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    # One row per (saved event, source lean). Selecting event_id, not
-    # created_at: two events saved in the same transaction share a timestamp,
-    # so counting distinct timestamps undercounts saved events.
-    rows = (
-        await db.execute(
-            select(Bookmark.event_id, Source.bias_lean)
-            .join(Event, Event.id == Bookmark.event_id)
-            .join(Article, Article.event_id == Event.id)
-            .join(Source, Source.id == Article.source_id)
-            .where(Bookmark.user_id == user_uuid)
-            .distinct(Bookmark.event_id, Source.bias_lean)
+    # "Saved" spans both mechanisms: a flat bookmark and an item placed in a
+    # reading list. An event saved both ways is one saved event.
+    bookmark_saves = select(
+        Bookmark.event_id.label("event_id"),
+        Bookmark.created_at.label("saved_at"),
+    ).where(Bookmark.user_id == user_uuid)
+    list_saves = (
+        select(
+            ReadingListItem.event_id.label("event_id"),
+            ReadingListItem.created_at.label("saved_at"),
         )
-    ).all()
+        .join(ReadingList, ReadingList.id == ReadingListItem.list_id)
+        .where(ReadingList.user_id == user_uuid, ReadingListItem.event_id.isnot(None))
+    )
+    saves = union_all(bookmark_saves, list_saves).subquery()
+    save_rows = (await db.execute(select(saves.c.event_id, saves.c.saved_at))).all()
 
-    if not rows:
-        return {
-            "user_id": user_id,
-            "total_events_saved": 0,
-            "bias_distribution": {},
-            "gamification_message": None,
-        }
-
-    total = len({r[0] for r in rows})
-
-    # An event saved from several outlets contributes once to each lean it
-    # draws on, so leans are counted as coverage of saved events, not as a
-    # partition of them.
-    leans_per_event: dict[object, set[str]] = {}
-    for event_id, lean in rows:
-        if lean is None:
+    # Earliest save wins, so an event added to a list weeks ago and re-saved
+    # today is dated to when it first became part of the user's reading.
+    saved_at: dict[uuid.UUID, object] = {}
+    for event_id, timestamp in save_rows:
+        if event_id is None:
             continue
-        name = lean.name if hasattr(lean, "name") else str(lean)
-        leans_per_event.setdefault(event_id, set()).add(name)
+        existing = saved_at.get(event_id)
+        if existing is None or (timestamp is not None and timestamp < existing):
+            saved_at[event_id] = timestamp
 
-    distribution: dict[str, int] = {}
-    for leans in leans_per_event.values():
-        for name in leans:
-            distribution[name] = distribution.get(name, 0) + 1
+    event_ids = list(saved_at.keys())
+    total = len(event_ids)
+
+    now = datetime.now(timezone.utc)
+    weekly_ids = {
+        event_id
+        for event_id, timestamp in saved_at.items()
+        if timestamp is not None and timestamp >= now - timedelta(days=7)
+    }
+
+    bias_distribution: dict[str, int] = {}
+    bias_distribution_7d: dict[str, int] = {}
+    topic_distribution: dict[str, int] = {}
+    weekly_bias_message = None
+
+    if event_ids:
+        # One row per (saved event, source lean). Selecting event_id, not
+        # created_at: two events saved in the same transaction share a
+        # timestamp, so counting distinct timestamps undercounts saved events.
+        lean_rows = (
+            await db.execute(
+                select(Event.id, Source.bias_lean)
+                .join(Article, Article.event_id == Event.id)
+                .join(Source, Source.id == Article.source_id)
+                .where(Event.id.in_(event_ids))
+                .distinct(Event.id, Source.bias_lean)
+            )
+        ).all()
+
+        # An event saved from several outlets contributes once to each lean it
+        # draws on, so leans are counted as coverage of saved events, not as a
+        # partition of them.
+        leans_per_event: dict[object, set[str]] = {}
+        for event_id, lean in lean_rows:
+            if lean is None:
+                continue
+            name = lean.name if hasattr(lean, "name") else str(lean)
+            leans_per_event.setdefault(event_id, set()).add(name)
+            bias_distribution[name] = bias_distribution.get(name, 0) + 1
+            if event_id in weekly_ids:
+                bias_distribution_7d[name] = bias_distribution_7d.get(name, 0) + 1
+
+        topic_rows = (
+            await db.execute(select(Event.topic).where(Event.id.in_(event_ids)))
+        ).all()
+        for (topic,) in topic_rows:
+            if topic:
+                topic_distribution[topic] = topic_distribution.get(topic, 0) + 1
+
+        weekly_bias_message = _weekly_bias_message(weekly_ids, leans_per_event)
+
     message = None
-    if total >= 5 and distribution:
+    if total >= 5 and bias_distribution:
         # Name the least-covered lean rather than asserting a conclusion about
         # the reader. A single saved article proves nothing about their habits.
-        least = min(distribution.items(), key=lambda kv: kv[1])
+        least = min(bias_distribution.items(), key=lambda kv: kv[1])
         share = round((least[1] / total) * 100)
-        if share < 20 and len(distribution) > 1:
+        if share < 20 and len(bias_distribution) > 1:
             message = (
                 f"{share}% of your saved events came from "
                 f"{least[0].replace('_', ' ').lower()} sources. "
@@ -301,7 +355,11 @@ async def get_reading_stats(
     return {
         "user_id": user_id,
         "total_events_saved": total,
-        "bias_distribution": distribution,
+        "saved_last_7_days": len(weekly_ids),
+        "bias_distribution": bias_distribution,
+        "bias_distribution_7d": bias_distribution_7d,
+        "topic_distribution": topic_distribution,
+        "weekly_bias_message": weekly_bias_message,
         "gamification_message": message,
     }
 

@@ -15,6 +15,9 @@ import {
   Newspaper,
 } from "lucide-react";
 import PillNav from "../components/PillNav";
+import NotificationSettings from "../../components/NotificationSettings";
+import ReadingHabits from "../../components/ReadingHabits";
+import TopicTrends from "../../components/TopicTrends";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -190,7 +193,10 @@ export default function ProfilePage() {
             { label: "Profile", href: "/profile" },
             ...(profile?.role === "ADMIN" ? [{ label: "Admin", href: "/admin/dashboard" }] : []),
             { label: "Dispatches", href: "/dispatches" },
+            { label: "Reading Lists", href: "/reading-lists" },
+            { label: "Newsletter", href: "/newsletter" },
             { label: "Fact Checker", href: "/fact-checker" },
+            { label: "Offline", href: "/offline" },
           ]}
           activeHref="/profile"
           baseColor="#080c16"
@@ -362,6 +368,15 @@ export default function ProfilePage() {
                 </button>
               </section>
             )}
+
+            {/* Push notifications */}
+            {token && <NotificationSettings token={token} />}
+
+            {/* Reading habits — computed from saved events only */}
+            {token && <ReadingHabits token={token} userId={profile.id} />}
+
+            {/* Topics gaining coverage — aggregated across the platform */}
+            {token && <TopicTrends token={token} />}
 
             {/* Session */}
             <section className="bg-surface-container border border-outline-variant rounded-lg p-stack-md">

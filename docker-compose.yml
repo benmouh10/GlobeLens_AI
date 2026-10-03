@@ -5,6 +5,9 @@
 # Services:
 #   backend   — FastAPI application (port 8000) with hot-reload
 #   frontend  — Next.js web client placeholder (port 3000)
+#   worker    — Celery worker for background jobs (newsletter dispatch)
+#   beat      — Celery beat scheduler (daily/weekly digest)
+#   mailpit   — Local SMTP catcher (SMTP 1025, web UI 8025)
 #   db        — PostgreSQL 16 + pgvector extension (port 5432)
 #   cache     — Redis Stack (port 6379)
 #   search    — Elasticsearch 8.x single-node (port 9200)
@@ -127,6 +130,27 @@ services:
       start_period: 60s
 
   # ─────────────────────────────────────────────────────────────────────────
+  # Mailpit — Local SMTP catcher + web UI (development email sink)
+  # ─────────────────────────────────────────────────────────────────────────
+  # Every message the backend sends in dev lands here instead of a real inbox.
+  # Inspect it at http://localhost:8025.
+  mailpit:
+    image: axllent/mailpit:v1.20
+    container_name: globelens_mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # Web UI / REST API
+    networks:
+      - globelens_net
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ─────────────────────────────────────────────────────────────────────────
   # FastAPI Backend — Core application layer
   # ─────────────────────────────────────────────────────────────────────────
   backend:
@@ -192,6 +216,33 @@ services:
 
       # ── CORS ──
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+
+      # ── Email / Newsletter (SMTP) ──
+      # Dev default points at the Mailpit catcher. Override SMTP_* for prod.
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-newsletter@globelens.ai}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-GlobeLens AI}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_SSL: ${SMTP_SSL:-false}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:8000}
+      NEWSLETTER_DAILY_TOP_N: ${NEWSLETTER_DAILY_TOP_N:-5}
+      NEWSLETTER_WEEKLY_TOP_N: ${NEWSLETTER_WEEKLY_TOP_N:-8}
+      NEWSLETTER_DAILY_HOUR_UTC: ${NEWSLETTER_DAILY_HOUR_UTC:-7}
+      NEWSLETTER_WEEKLY_DAY: ${NEWSLETTER_WEEKLY_DAY:-monday}
+      NEWSLETTER_WEEKLY_HOUR_UTC: ${NEWSLETTER_WEEKLY_HOUR_UTC:-8}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-}
+
+      # ── Web Push (VAPID) ──
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:ops@globelens.ai}
+      PUSH_TTL_SECONDS: ${PUSH_TTL_SECONDS:-3600}
+      PUSH_DAILY_BRIEFING_HOUR_UTC: ${PUSH_DAILY_BRIEFING_HOUR_UTC:-8}
     networks:
       - globelens_net
     # Backend only starts after all infrastructure services are healthy
@@ -202,6 +253,8 @@ services:
         condition: service_healthy
       search:
         condition: service_healthy
+      mailpit:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
       interval: 15s
@@ -241,3 +294,94 @@ services:
       timeout: 10s
       retries: 5
       start_period: 45s
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Celery Worker — executes background tasks (newsletter dispatch, etc.)
+  # ─────────────────────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: globelens_worker
+    restart: unless-stopped
+    command: celery -A app.worker.celery_app.celery_app worker --loglevel=info
+    volumes:
+      - ./backend/app:/app/app:delegated
+      - ./backend/alembic.ini:/app/alembic.ini
+      - ./backend/alembic:/app/alembic
+      - ./backend/logs:/app/logs
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      SECRET_KEY: ${SECRET_KEY:-super_secret_dev_key_change_in_production}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-globelens}:${POSTGRES_PASSWORD:-globelens_secret}@db:5432/${POSTGRES_DB:-globelens_db}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@cache:6379/0
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-newsletter@globelens.ai}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-GlobeLens AI}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_SSL: ${SMTP_SSL:-false}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:8000}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:ops@globelens.ai}
+      PUSH_TTL_SECONDS: ${PUSH_TTL_SECONDS:-3600}
+    networks:
+      - globelens_net
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    healthcheck:
+      disable: true
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Celery Beat — scheduler that emits digest tasks on the configured cadence
+  # ─────────────────────────────────────────────────────────────────────────
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: globelens_beat
+    restart: unless-stopped
+    command: celery -A app.worker.celery_app.celery_app beat --loglevel=info
+    volumes:
+      - ./backend/app:/app/app:delegated
+      - ./backend/alembic.ini:/app/alembic.ini
+      - ./backend/alembic:/app/alembic
+      - ./backend/logs:/app/logs
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      SECRET_KEY: ${SECRET_KEY:-super_secret_dev_key_change_in_production}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-globelens}:${POSTGRES_PASSWORD:-globelens_secret}@db:5432/${POSTGRES_DB:-globelens_db}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@cache:6379/0
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-}
+      # Cadence — beat reads these to build its schedule
+      NEWSLETTER_DAILY_HOUR_UTC: ${NEWSLETTER_DAILY_HOUR_UTC:-7}
+      NEWSLETTER_WEEKLY_DAY: ${NEWSLETTER_WEEKLY_DAY:-monday}
+      NEWSLETTER_WEEKLY_HOUR_UTC: ${NEWSLETTER_WEEKLY_HOUR_UTC:-8}
+      PUSH_DAILY_BRIEFING_HOUR_UTC: ${PUSH_DAILY_BRIEFING_HOUR_UTC:-8}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:ops@globelens.ai}
+      PUSH_TTL_SECONDS: ${PUSH_TTL_SECONDS:-3600}
+    networks:
+      - globelens_net
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    healthcheck:
+      disable: true

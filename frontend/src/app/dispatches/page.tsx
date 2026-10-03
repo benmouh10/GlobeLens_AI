@@ -102,9 +102,12 @@ export default function DispatchesPage() {
               },
             },
             { label: "Dispatches", href: "/dispatches" },
+            { label: "Reading Lists", href: "/reading-lists" },
+            { label: "Newsletter", href: "/newsletter" },
             { label: "Profile", href: "/profile" },
             ...(showAdmin ? [{ label: "Admin", href: "/admin/dashboard" }] : []),
             { label: "Fact Checker", href: "/fact-checker" },
+            { label: "Offline", href: "/offline" },
           ]}
           activeHref="/dispatches"
           baseColor="#080c16"
